@@ -1,0 +1,13 @@
+html,
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100%;
+  overflow: hidden;
+  background: #101316;
+}
+
+#app {
+  width: 100vw;
+  height: 100vh;
+}
