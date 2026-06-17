@@ -7,6 +7,11 @@ import Barricade from '../entities/Barricade'
 import Bullet from '../entities/Bullet'
 import Player from '../entities/Player'
 import Zombie from '../entities/Zombie'
+import {
+  createMultiplayerSocket,
+  type MultiplayerSocket,
+  type NetworkPlayerState,
+} from '../network/socketClient'
 
 const DEBUG_BARRICADE_ATTACKS = false
 const DEBUG_NAV = false
@@ -40,6 +45,14 @@ type GridCell = {
   y: number
 }
 
+type GameMode = 'singlePlayer' | 'multiplayer'
+
+type RemotePlayerView = {
+  sprite: Phaser.GameObjects.Sprite
+  aimLine: Phaser.GameObjects.Rectangle
+  label: Phaser.GameObjects.Text
+}
+
 export default class GameScene extends Phaser.Scene {
   private player!: Player
   private bullets!: Phaser.Physics.Arcade.Group
@@ -60,6 +73,7 @@ export default class GameScene extends Phaser.Scene {
   private weaponText!: Phaser.GameObjects.Text
   private ownedWeaponsText!: Phaser.GameObjects.Text
   private barricadeText!: Phaser.GameObjects.Text
+  private multiplayerText!: Phaser.GameObjects.Text
   private messageText!: Phaser.GameObjects.Text
   private repairHintText!: Phaser.GameObjects.Text
   private pauseButton!: Phaser.GameObjects.Text
@@ -88,6 +102,13 @@ export default class GameScene extends Phaser.Scene {
   private isStarted = false
   private isPaused = false
   private isGameOver = false
+  private gameMode: GameMode = 'singlePlayer'
+  private multiplayerSocket?: MultiplayerSocket
+  private localPlayerId?: string
+  private activeRoomCode?: string
+  private remotePlayers = new Map<string, RemotePlayerView>()
+  private lastNetworkSendAt = 0
+  private multiplayerStatusText?: Phaser.GameObjects.Text
   private lastPlayerZone: BaseZone = 'inside'
   private navCellSize = 32
   private navCols = 0
@@ -102,6 +123,7 @@ export default class GameScene extends Phaser.Scene {
 
   preload() {
     this.createCircleTexture('player', 36, 0x4aa3ff, 0xffffff)
+    this.createCircleTexture('remotePlayer', 36, 0xffc857, 0xffffff)
     this.createCircleTexture('zombie', 34, 0x62b846, 0x20351b)
     this.createCircleTexture('bullet', 8, 0xfff2a8, 0xffffff)
   }
@@ -135,6 +157,7 @@ export default class GameScene extends Phaser.Scene {
     this.scale.on('resize', this.handleResize, this)
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       this.scale.off('resize', this.handleResize, this)
+      this.disconnectMultiplayer()
     })
   }
 
@@ -159,6 +182,7 @@ export default class GameScene extends Phaser.Scene {
     this.updateWeaponSwitching()
     this.updateRepairInteraction()
     this.updatePlayerZoneNavigation()
+    this.sendMultiplayerState(time)
 
     if (!this.isIntermission && this.input.activePointer.isDown) {
       this.tryShoot(time)
@@ -344,6 +368,7 @@ export default class GameScene extends Phaser.Scene {
     this.weaponText = this.add.text(20, 138, `Weapon ${this.currentWeapon.name}`, this.hudTextStyle())
     this.ownedWeaponsText = this.add.text(20, 166, this.getOwnedWeaponsLabel(), this.smallHudTextStyle())
     this.barricadeText = this.add.text(20, 190, this.getBarricadeStatusLabel(), this.smallHudTextStyle())
+    this.multiplayerText = this.add.text(20, 214, '', this.smallHudTextStyle())
     this.messageText = this.add.text(this.scale.width / 2, 34, '', {
       align: 'center',
       color: '#fff2a8',
@@ -394,9 +419,9 @@ export default class GameScene extends Phaser.Scene {
   private showStartScreen() {
     const centerX = this.scale.width / 2
     const centerY = this.scale.height / 2
-    const panel = this.add.rectangle(0, 0, 620, 430, 0x000000, 0.82)
+    const panel = this.add.rectangle(0, 0, 680, 540, 0x000000, 0.82)
     const title = this.add
-      .text(0, -155, 'FINAL DAYZ', {
+      .text(0, -205, 'FINAL DAYZ', {
         color: '#ff5555',
         fontFamily: 'Arial',
         fontSize: '56px',
@@ -404,7 +429,7 @@ export default class GameScene extends Phaser.Scene {
       })
       .setOrigin(0.5)
     const instructions = this.add
-      .text(0, -42, 'WASD to move\nMouse to aim\nHold left click to shoot\n1/2/3 switch weapons\nE repairs damaged barricades', {
+      .text(0, -88, 'WASD to move\nMouse to aim\nHold left click to shoot\n1/2/3 switch weapons\nE repairs damaged barricades', {
         align: 'center',
         color: '#ffffff',
         fontFamily: 'Arial',
@@ -412,11 +437,38 @@ export default class GameScene extends Phaser.Scene {
         lineSpacing: 10,
       })
       .setOrigin(0.5)
-    const startButton = this.add
-      .text(0, 150, 'Start Game', {
-        backgroundColor: '#2ecc71',
+    const singlePlayerButton = this.createStartMenuButton(0, 72, 'Single Player', 0x2ecc71, () => this.startGame('singlePlayer'))
+    const createRoomButton = this.createStartMenuButton(0, 134, 'Create Co-op Room', 0x4aa3ff, () => this.createCoopRoom())
+    const joinRoomButton = this.createStartMenuButton(0, 196, 'Join Co-op Room', 0xffc857, () => this.promptJoinCoopRoom())
+    this.multiplayerStatusText = this.add
+      .text(0, 250, '', {
+        align: 'center',
+        color: '#fff2a8',
+        fontFamily: 'Arial',
+        fontSize: '18px',
+        stroke: '#000000',
+        strokeThickness: 3,
+      })
+      .setOrigin(0.5)
+
+    this.startOverlay = this.add.container(centerX, centerY, [
+      panel,
+      title,
+      instructions,
+      singlePlayerButton,
+      createRoomButton,
+      joinRoomButton,
+      this.multiplayerStatusText,
+    ])
+    this.startOverlay.setDepth(10)
+  }
+
+  private createStartMenuButton(x: number, y: number, label: string, backgroundColor: number, onClick: () => void) {
+    const button = this.add
+      .text(x, y, label, {
+        backgroundColor: Phaser.Display.Color.IntegerToColor(backgroundColor).rgba,
         color: '#101316',
-        fixedWidth: 190,
+        fixedWidth: 250,
         fontFamily: 'Arial',
         fontSize: '22px',
         fontStyle: 'bold',
@@ -426,21 +478,193 @@ export default class GameScene extends Phaser.Scene {
       .setOrigin(0.5)
       .setInteractive({ useHandCursor: true })
 
-    this.startOverlay = this.add.container(centerX, centerY, [panel, title, instructions, startButton])
-    this.startOverlay.setDepth(10)
-
-    startButton.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+    button.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
       pointer.event.stopPropagation()
-      this.startGame()
+      onClick()
     })
+
+    return button
   }
 
-  private startGame() {
+  private startGame(mode: GameMode) {
+    this.gameMode = mode
     this.isStarted = true
     this.startOverlay?.destroy()
     this.startOverlay = undefined
+    this.multiplayerStatusText = undefined
     this.isIntermission = true
+    this.multiplayerText.setText(this.activeRoomCode ? `Room ${this.activeRoomCode}` : '')
     this.startNextWave()
+  }
+
+  private createCoopRoom() {
+    this.setMultiplayerStatus('Connecting to co-op server...')
+    this.connectMultiplayerSocket((socket) => {
+      this.setMultiplayerStatus('Creating room...')
+      socket.emit('createRoom')
+    })
+  }
+
+  private promptJoinCoopRoom() {
+    const roomCode = window.prompt('Enter co-op room code:')
+
+    if (!roomCode) {
+      return
+    }
+
+    this.setMultiplayerStatus('Connecting to co-op server...')
+    this.connectMultiplayerSocket((socket) => {
+      this.setMultiplayerStatus(`Joining ${roomCode.trim().toUpperCase()}...`)
+      socket.emit('joinRoom', roomCode)
+    })
+  }
+
+  private connectMultiplayerSocket(onConnected: (socket: MultiplayerSocket) => void) {
+    const socket = this.getMultiplayerSocket()
+
+    if (socket.connected) {
+      onConnected(socket)
+      return
+    }
+
+    socket.once('connect', () => onConnected(socket))
+    socket.connect()
+  }
+
+  private getMultiplayerSocket() {
+    if (this.multiplayerSocket) {
+      return this.multiplayerSocket
+    }
+
+    const socket = createMultiplayerSocket()
+    this.multiplayerSocket = socket
+
+    socket.on('roomCreated', ({ roomCode }) => {
+      this.activeRoomCode = roomCode
+      this.setMultiplayerStatus(`Room created: ${roomCode}`)
+    })
+
+    socket.on('roomJoined', ({ roomCode, playerId, players }) => {
+      this.localPlayerId = playerId
+      this.activeRoomCode = roomCode
+      this.renderRemotePlayers(players)
+
+      if (!this.isStarted) {
+        this.startGame('multiplayer')
+      }
+
+      this.showMessage(`Co-op room ${roomCode}`)
+    })
+
+    socket.on('playerJoined', (player) => {
+      this.showMessage('Player joined')
+      this.renderRemotePlayers([player])
+    })
+
+    socket.on('playerLeft', ({ playerId }) => {
+      this.removeRemotePlayer(playerId)
+      this.showMessage('Player left')
+    })
+
+    socket.on('roomFull', () => this.setMultiplayerStatus('That room is full.'))
+    socket.on('roomNotFound', () => this.setMultiplayerStatus('Room not found.'))
+    socket.on('playerStates', (players) => this.renderRemotePlayers(players))
+    socket.on('connect_error', () => this.setMultiplayerStatus('Could not connect. Single Player still works.'))
+
+    return socket
+  }
+
+  private setMultiplayerStatus(message: string) {
+    this.multiplayerStatusText?.setText(message)
+  }
+
+  private sendMultiplayerState(time: number) {
+    if (this.gameMode !== 'multiplayer' || !this.multiplayerSocket?.connected || time - this.lastNetworkSendAt < 50) {
+      return
+    }
+
+    this.lastNetworkSendAt = time
+    this.multiplayerSocket.emit('playerStateUpdate', {
+      x: this.player.x,
+      y: this.player.y,
+      rotation: this.player.rotation,
+      aimX: this.input.activePointer.worldX,
+      aimY: this.input.activePointer.worldY,
+      weapon: this.currentWeapon.name,
+    })
+  }
+
+  private renderRemotePlayers(players: NetworkPlayerState[]) {
+    players.forEach((player) => {
+      if (player.id === this.localPlayerId) {
+        return
+      }
+
+      const view = this.getRemotePlayerView(player.id)
+      view.sprite.setPosition(player.x, player.y)
+      view.sprite.setRotation(player.rotation)
+      view.aimLine.setPosition(player.x, player.y)
+      view.aimLine.setRotation(player.rotation)
+      view.label.setPosition(player.x, player.y - 34)
+      view.label.setText(player.weapon || 'Co-op')
+    })
+
+    const playerIds = new Set(players.map((player) => player.id))
+    this.remotePlayers.forEach((_view, playerId) => {
+      if (!playerIds.has(playerId)) {
+        this.removeRemotePlayer(playerId)
+      }
+    })
+  }
+
+  private getRemotePlayerView(playerId: string) {
+    const existing = this.remotePlayers.get(playerId)
+
+    if (existing) {
+      return existing
+    }
+
+    const sprite = this.add.sprite(this.player.x, this.player.y, 'remotePlayer').setDepth(3)
+    const aimLine = this.add.rectangle(this.player.x + 18, this.player.y, 28, 4, 0xffc857, 0.95).setOrigin(0, 0.5).setDepth(4)
+    const label = this.add
+      .text(this.player.x, this.player.y - 34, 'Co-op', {
+        color: '#fff2a8',
+        fontFamily: 'Arial',
+        fontSize: '12px',
+        stroke: '#000000',
+        strokeThickness: 3,
+      })
+      .setOrigin(0.5)
+      .setDepth(4)
+    const view = { sprite, aimLine, label }
+
+    this.remotePlayers.set(playerId, view)
+    return view
+  }
+
+  private removeRemotePlayer(playerId: string) {
+    const view = this.remotePlayers.get(playerId)
+
+    if (!view) {
+      return
+    }
+
+    view.sprite.destroy()
+    view.aimLine.destroy()
+    view.label.destroy()
+    this.remotePlayers.delete(playerId)
+  }
+
+  private disconnectMultiplayer() {
+    this.multiplayerSocket?.emit('leaveRoom')
+    this.multiplayerSocket?.disconnect()
+    this.multiplayerSocket = undefined
+    this.remotePlayers.forEach((view) => {
+      view.sprite.destroy()
+      view.aimLine.destroy()
+      view.label.destroy()
+    })
+    this.remotePlayers.clear()
   }
 
   private hudTextStyle(): Phaser.Types.GameObjects.Text.TextStyle {
