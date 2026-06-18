@@ -25,6 +25,16 @@ export type ServerZombie = {
   maxHealth: number
   speed: number
   radius: number
+  targetEntryId?: EntryPointId
+  lastAttackAt: number
+}
+
+export type EntryPointId = 'top' | 'bottom' | 'left' | 'right'
+
+export type ServerBarricade = {
+  id: EntryPointId
+  health: number
+  maxHealth: number
 }
 
 export type ServerBullet = {
@@ -46,6 +56,7 @@ export type ServerRoom = {
   maxPlayers: number
   phase: RoomPhase
   players: Map<string, ServerPlayer>
+  barricades: Map<EntryPointId, ServerBarricade>
   zombies: Map<string, ServerZombie>
   bullets: Map<string, ServerBullet>
   score: number
