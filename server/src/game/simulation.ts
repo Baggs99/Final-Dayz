@@ -17,8 +17,10 @@ const PLAYER_RADIUS = 18
 const CONTACT_DAMAGE = 8
 const CONTACT_COOLDOWN_MS = 650
 const SCORE_PER_KILL = 10
-const DEBUG_GEOMETRY = false
+const DEBUG_MULTIPLAYER_SIM = false
 const ZOMBIE_WAYPOINT_TOLERANCE = 34
+const STUCK_CHECK_INTERVAL_MS = 500
+const STUCK_DISTANCE_THRESHOLD = 8
 const BARRICADE_MAX_HEALTH = 140
 const BARRICADE_ATTACK_DAMAGE = 18
 const BARRICADE_ATTACK_COOLDOWN_MS = 700
@@ -98,7 +100,21 @@ export function updatePlayerFromClient(player: ServerPlayer, state: Partial<Serv
 }
 
 export function tickRoom(room: ServerRoom, now: number) {
-  if (room.phase !== 'fighting' || !room.gameStarted || room.gameOver) {
+  if (!room.gameStarted || room.gameOver) {
+    room.lastTick = now
+    return
+  }
+
+  if (room.phase === 'waveComplete') {
+    if (now >= room.nextWaveAt) {
+      startNextWave(room, now)
+    }
+
+    room.lastTick = now
+    return
+  }
+
+  if (room.phase !== 'fighting') {
     room.lastTick = now
     return
   }
@@ -106,14 +122,18 @@ export function tickRoom(room: ServerRoom, now: number) {
   const deltaSeconds = Math.min((now - room.lastTick) / 1000, 0.1)
   room.lastTick = now
 
-  maybeStartNextWave(room, now)
+  if (room.zombies.size === 0 && now >= room.nextWaveAt) {
+    startNextWave(room, now)
+  }
+
   moveBullets(room, now, deltaSeconds)
   moveZombies(room, now, deltaSeconds)
-  const hadZombies = room.zombies.size > 0
   handleBulletZombieCollisions(room)
-  if (hadZombies && room.zombies.size === 0) {
-    room.nextWaveAt = now + 2500
+
+  if (isWaveCleared(room)) {
+    completeWave(room, now)
   }
+
   checkGameOver(room)
 }
 
@@ -171,6 +191,7 @@ export function getGameStateSnapshot(room: ServerRoom): GameStateSnapshot {
     phase: room.phase,
     hostId: room.hostId,
     players: Array.from(room.players.values()),
+    barricades: Array.from(room.barricades.values()),
     zombies: Array.from(room.zombies.values()),
     bullets: Array.from(room.bullets.values()),
     score: room.score,
@@ -217,23 +238,40 @@ export function startRoomCombat(room: ServerRoom, now: number) {
   })
 }
 
-function maybeStartNextWave(room: ServerRoom, now: number) {
-  if (room.zombies.size > 0 || now < room.nextWaveAt) {
-    return
-  }
-
+function startNextWave(room: ServerRoom, now: number) {
   room.wave += 1
+  room.phase = 'fighting'
+  room.nextWaveAt = Number.POSITIVE_INFINITY
+  room.bullets.clear()
   const count = 4 + room.wave * 3
   const health = 55 + room.wave * 10
   const speed = 48 + room.wave * 4
 
-  if (DEBUG_GEOMETRY) {
-    console.log(`wave ${room.wave} starting; server geometry blockers preserved`)
+  if (DEBUG_MULTIPLAYER_SIM) {
+    console.log(`wave started room=${room.code} wave=${room.wave} zombies=${count}`)
   }
 
   for (let index = 0; index < count; index += 1) {
     const zombie = createZombie(room, health, speed)
     room.zombies.set(zombie.id, zombie)
+
+    if (DEBUG_MULTIPLAYER_SIM) {
+      console.log(`zombie spawned ${zombie.id} ${Math.round(zombie.x)},${Math.round(zombie.y)}`)
+    }
+  }
+}
+
+function isWaveCleared(room: ServerRoom) {
+  return room.phase === 'fighting' && room.zombies.size === 0 && room.nextWaveAt === Number.POSITIVE_INFINITY
+}
+
+function completeWave(room: ServerRoom, now: number) {
+  room.phase = 'waveComplete'
+  room.nextWaveAt = now + 3000
+  room.bullets.clear()
+
+  if (DEBUG_MULTIPLAYER_SIM) {
+    console.log(`wave cleared room=${room.code} wave=${room.wave}; next wave at ${room.nextWaveAt}`)
   }
 }
 
@@ -265,7 +303,11 @@ function createZombie(room: ServerRoom, health: number, speed: number): ServerZo
     maxHealth: health,
     speed,
     radius: 17,
+    navState: 'chasingDirect',
     lastAttackAt: 0,
+    lastStuckCheckAt: 0,
+    lastStuckX: x,
+    lastStuckY: y,
   }
 }
 
@@ -301,13 +343,16 @@ function moveZombies(room: ServerRoom, now: number, deltaSeconds: number) {
       return
     }
 
+    zombie.targetPlayerId = target.id
     const targetPoint = getZombieMoveTarget(room, zombie, target, now)
 
     if (!targetPoint) {
+      updateZombieStuckState(room, zombie, target, now)
       return
     }
 
     moveZombieToward(room, zombie, targetPoint, deltaSeconds)
+    updateZombieStuckState(room, zombie, target, now)
 
     const contactRadius = zombie.radius + PLAYER_RADIUS
 
@@ -322,14 +367,18 @@ function getZombieMoveTarget(room: ServerRoom, zombie: ServerZombie, target: Ser
   const playerInside = isInsideBase(target.x, target.y)
 
   if (zombieInside && playerInside) {
+    setZombieTarget(zombie, 'chasingDirect', target)
     return target
   }
 
   if (!zombieInside && !playerInside) {
     if (lineIntersectsBase(zombie.x, zombie.y, target.x, target.y)) {
-      return getExteriorWaypointAroundBase(zombie.x, zombie.y, target.x, target.y)
+      const waypoint = getExteriorWaypointAroundBase(zombie.x, zombie.y, target.x, target.y)
+      setZombieTarget(zombie, 'routingToDoorway', waypoint)
+      return waypoint
     }
 
+    setZombieTarget(zombie, 'chasingDirect', target)
     return target
   }
 
@@ -337,7 +386,11 @@ function getZombieMoveTarget(room: ServerRoom, zombie: ServerZombie, target: Ser
   const openEntry = getNearestOpenEntry(room, zombie, direction)
 
   if (openEntry) {
-    return getRouteTarget(zombie, openEntry, direction)
+    const routeTarget = getRouteTarget(zombie, openEntry, direction)
+    zombie.targetDoorwayId = openEntry.id
+    zombie.targetEntryId = undefined
+    setZombieTarget(zombie, 'routingToDoorway', getSafeExteriorTarget(zombie, routeTarget))
+    return zombie.currentTargetPoint
   }
 
   const barricadeEntry = getNearestAliveEntry(room, zombie, direction)
@@ -348,12 +401,16 @@ function getZombieMoveTarget(room: ServerRoom, zombie: ServerZombie, target: Ser
 
   const attackPoint = direction === 'outsideToInside' ? barricadeEntry.outsidePoint : barricadeEntry.insidePoint
 
-  if (isNearPoint(zombie, attackPoint, 42) || rectangleContains(barricadeEntry.attackZone, zombie.x, zombie.y)) {
+  zombie.targetEntryId = barricadeEntry.id
+  zombie.targetDoorwayId = undefined
+
+  if (isInBarricadeAttackRange(zombie, barricadeEntry)) {
     attackBarricade(room, zombie, barricadeEntry.id, now)
     return undefined
   }
 
-  return attackPoint
+  setZombieTarget(zombie, 'movingToBarricade', getSafeExteriorTarget(zombie, attackPoint))
+  return zombie.currentTargetPoint
 }
 
 function moveZombieToward(room: ServerRoom, zombie: ServerZombie, target: Point, deltaSeconds: number) {
@@ -361,15 +418,32 @@ function moveZombieToward(room: ServerRoom, zombie: ServerZombie, target: Point,
   const nextX = zombie.x + direction.x * zombie.speed * deltaSeconds
   const nextY = zombie.y + direction.y * zombie.speed * deltaSeconds
 
-  if (isSolidAt(room, nextX, nextY, zombie.radius)) {
-    if (DEBUG_GEOMETRY) {
-      console.log(`zombie blocked ${zombie.id} at ${Math.round(nextX)},${Math.round(nextY)}`)
-    }
+  if (canMoveTo(room, zombie, nextX, nextY)) {
+    zombie.x = nextX
+    zombie.y = nextY
     return
   }
 
-  zombie.x = nextX
-  zombie.y = nextY
+  const canMoveX = canMoveTo(room, zombie, nextX, zombie.y)
+  const canMoveY = canMoveTo(room, zombie, zombie.x, nextY)
+
+  if (canMoveX || canMoveY) {
+    if (canMoveX) {
+      zombie.x = nextX
+    }
+
+    if (canMoveY) {
+      zombie.y = nextY
+    }
+
+    return
+  }
+
+  zombie.navState = 'stuck'
+
+  if (DEBUG_MULTIPLAYER_SIM) {
+      console.log(`zombie blocked ${zombie.id} at ${Math.round(nextX)},${Math.round(nextY)}`)
+  }
 }
 
 function getRouteTarget(
@@ -413,11 +487,82 @@ function attackBarricade(room: ServerRoom, zombie: ServerZombie, entryId: EntryG
     return
   }
 
+  zombie.navState = 'attackingBarricade'
   zombie.lastAttackAt = now
   barricade.health = Math.max(0, barricade.health - BARRICADE_ATTACK_DAMAGE)
 
-  if (DEBUG_GEOMETRY) {
+  if (DEBUG_MULTIPLAYER_SIM) {
     console.log(`zombie damaged ${entryId} barricade: ${barricade.health}/${barricade.maxHealth}`)
+  }
+
+  if (barricade.health === 0 && DEBUG_MULTIPLAYER_SIM) {
+    console.log(`barricade destroyed ${entryId}; doorway open`)
+  }
+}
+
+function setZombieTarget(zombie: ServerZombie, navState: ServerZombie['navState'], point: Point) {
+  zombie.navState = navState
+  zombie.currentTargetPoint = { x: point.x, y: point.y }
+}
+
+function getSafeExteriorTarget(zombie: ServerZombie, target: Point): Point {
+  if (!isInsideBase(zombie.x, zombie.y) && !isInsideBase(target.x, target.y) && lineIntersectsBase(zombie.x, zombie.y, target.x, target.y)) {
+    return getExteriorWaypointAroundBase(zombie.x, zombie.y, target.x, target.y)
+  }
+
+  return target
+}
+
+function isInBarricadeAttackRange(zombie: ServerZombie, entry: EntryGeometry) {
+  const expanded = expandRect(entry.barricadeRect, 76)
+  return rectangleContains(expanded, zombie.x, zombie.y) ||
+    rectangleContains(entry.attackZone, zombie.x, zombie.y) ||
+    isNearPoint(zombie, entry.outsidePoint, 78) ||
+    isNearPoint(zombie, entry.insidePoint, 78)
+}
+
+function updateZombieStuckState(room: ServerRoom, zombie: ServerZombie, target: ServerPlayer, now: number) {
+  if (zombie.navState === 'attackingBarricade') {
+    zombie.lastStuckCheckAt = now
+    zombie.lastStuckX = zombie.x
+    zombie.lastStuckY = zombie.y
+    return
+  }
+
+  if (zombie.lastStuckCheckAt === 0) {
+    zombie.lastStuckCheckAt = now
+    zombie.lastStuckX = zombie.x
+    zombie.lastStuckY = zombie.y
+    return
+  }
+
+  if (now - zombie.lastStuckCheckAt < STUCK_CHECK_INTERVAL_MS) {
+    return
+  }
+
+  const moved = Math.sqrt(distanceSquared(zombie.x, zombie.y, zombie.lastStuckX, zombie.lastStuckY))
+  zombie.lastStuckCheckAt = now
+  zombie.lastStuckX = zombie.x
+  zombie.lastStuckY = zombie.y
+
+  if (moved >= STUCK_DISTANCE_THRESHOLD) {
+    return
+  }
+
+  zombie.navState = 'stuck'
+
+  const nearbyEntry = entryGeometries.find((entry) => {
+    const barricade = room.barricades.get(entry.id)
+    return (barricade?.health ?? 0) > 0 && isInBarricadeAttackRange(zombie, entry)
+  })
+
+  if (nearbyEntry) {
+    attackBarricade(room, zombie, nearbyEntry.id, now)
+    return
+  }
+
+  if (DEBUG_MULTIPLAYER_SIM) {
+    console.log(`zombie stuck ${zombie.id}; recomputing toward ${target.id}`)
   }
 }
 
@@ -504,6 +649,15 @@ function rectFromCenter(centerX: number, centerY: number, width: number, height:
   return { x: centerX - width / 2, y: centerY - height / 2, width, height }
 }
 
+function expandRect(rect: Rect, amount: number): Rect {
+  return {
+    x: rect.x - amount,
+    y: rect.y - amount,
+    width: rect.width + amount * 2,
+    height: rect.height + amount * 2,
+  }
+}
+
 function isInsideBase(x: number, y: number) {
   return x > BASE.x + BASE.wallThickness && x < BASE.x + BASE.width - BASE.wallThickness &&
     y > BASE.y + BASE.wallThickness && y < BASE.y + BASE.height - BASE.wallThickness
@@ -546,6 +700,10 @@ function isSolidAt(room: ServerRoom, x: number, y: number, radius: number) {
     const barricade = room.barricades.get(entry.id)
     return (barricade?.health ?? 0) > 0 && circleIntersectsRect(x, y, radius, entry.barricadeRect)
   })
+}
+
+function canMoveTo(room: ServerRoom, zombie: ServerZombie, x: number, y: number) {
+  return !isSolidAt(room, x, y, zombie.radius)
 }
 
 function isNearPoint(point: Point, target: Point, tolerance: number) {

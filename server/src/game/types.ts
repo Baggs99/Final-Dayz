@@ -1,6 +1,6 @@
 import type { WeaponId } from './weapons.js'
 
-export type RoomPhase = 'waitingForPlayers' | 'readyToStart' | 'fighting' | 'shopping' | 'gameOver'
+export type RoomPhase = 'waitingForPlayers' | 'readyToStart' | 'fighting' | 'waveComplete' | 'shopping' | 'gameOver'
 
 export type ServerPlayer = {
   id: string
@@ -25,8 +25,15 @@ export type ServerZombie = {
   maxHealth: number
   speed: number
   radius: number
+  navState: 'chasingDirect' | 'movingToBarricade' | 'attackingBarricade' | 'routingToDoorway' | 'stuck'
+  targetPlayerId?: string
   targetEntryId?: EntryPointId
+  targetDoorwayId?: EntryPointId
+  currentTargetPoint?: { x: number; y: number }
   lastAttackAt: number
+  lastStuckCheckAt: number
+  lastStuckX: number
+  lastStuckY: number
 }
 
 export type EntryPointId = 'top' | 'bottom' | 'left' | 'right'
@@ -87,6 +94,7 @@ export type GameStateSnapshot = {
   phase: RoomPhase
   hostId: string
   players: ServerPlayer[]
+  barricades: ServerBarricade[]
   zombies: ServerZombie[]
   bullets: ServerBullet[]
   score: number

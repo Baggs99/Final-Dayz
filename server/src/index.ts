@@ -120,7 +120,7 @@ setInterval(() => {
 
   rooms.forEach((room) => {
     tickRoom(room, now)
-    if (room.phase === 'fighting' || room.phase === 'gameOver') {
+    if (room.phase === 'fighting' || room.phase === 'waveComplete' || room.phase === 'gameOver') {
       io.to(room.code).emit('gameState', getGameStateSnapshot(room))
     }
   })

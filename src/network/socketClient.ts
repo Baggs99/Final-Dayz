@@ -24,6 +24,17 @@ export type NetworkZombieState = {
   maxHealth: number
   speed: number
   radius: number
+  navState?: string
+  targetPlayerId?: string
+  targetEntryId?: string
+  targetDoorwayId?: string
+  currentTargetPoint?: { x: number; y: number }
+}
+
+export type NetworkBarricadeState = {
+  id: 'top' | 'bottom' | 'left' | 'right'
+  health: number
+  maxHealth: number
 }
 
 export type NetworkBulletState = {
@@ -44,6 +55,7 @@ export type NetworkGameState = {
   phase: RoomPhase
   hostId: string
   players: NetworkPlayerState[]
+  barricades: NetworkBarricadeState[]
   zombies: NetworkZombieState[]
   bullets: NetworkBulletState[]
   score: number
@@ -51,7 +63,7 @@ export type NetworkGameState = {
   gameOver: boolean
 }
 
-export type RoomPhase = 'waitingForPlayers' | 'readyToStart' | 'fighting' | 'shopping' | 'gameOver'
+export type RoomPhase = 'waitingForPlayers' | 'readyToStart' | 'fighting' | 'waveComplete' | 'shopping' | 'gameOver'
 
 export type NetworkRoomState = {
   roomCode: string

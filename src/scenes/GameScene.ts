@@ -14,6 +14,7 @@ import {
   type NetworkBulletState,
   type NetworkGameState,
   type MultiplayerSocket,
+  type NetworkBarricadeState,
   type NetworkPlayerState,
   type NetworkRoomState,
   type NetworkZombieState,
@@ -933,6 +934,7 @@ export default class GameScene extends Phaser.Scene {
     }
 
     this.renderRemotePlayers(gameState.players)
+    this.syncServerBarricades(gameState.barricades)
     this.renderServerZombies(gameState.zombies)
     this.renderServerBullets(gameState.bullets)
     this.updateMultiplayerHud(gameState)
@@ -940,6 +942,24 @@ export default class GameScene extends Phaser.Scene {
     if (gameState.gameOver && !this.isGameOver) {
       this.endGame()
     }
+  }
+
+  private syncServerBarricades(barricades: NetworkBarricadeState[]) {
+    const barricadeById = new Map(barricades.map((barricade) => [barricade.id, barricade]))
+    const ids: NetworkBarricadeState['id'][] = ['top', 'bottom', 'left', 'right']
+
+    ids.forEach((id, index) => {
+      const barricadeState = barricadeById.get(id)
+      const barricade = this.barricades[index]
+
+      if (!barricadeState || !barricade) {
+        return
+      }
+
+      barricade.syncHealth(barricadeState.health, barricadeState.maxHealth)
+    })
+
+    this.updateBarricadeHud()
   }
 
   private renderServerZombies(zombies: NetworkZombieState[]) {
@@ -1020,9 +1040,10 @@ export default class GameScene extends Phaser.Scene {
   }
 
   private updateMultiplayerHud(gameState: NetworkGameState) {
-    this.waveText.setText(`Wave ${gameState.wave}`)
+    this.waveText.setText(gameState.phase === 'waveComplete' ? `Wave ${gameState.wave} Complete` : `Wave ${gameState.wave}`)
     this.scoreText.setText(`Score ${gameState.score}`)
     this.cashText.setText('Cash --')
+    this.multiplayerText.setText(`Room ${gameState.roomCode} ${gameState.phase}`)
 
     const localPlayer = gameState.players.find((player) => player.id === this.localPlayerId)
 

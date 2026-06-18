@@ -57,6 +57,12 @@ export default class Barricade extends Phaser.GameObjects.Rectangle {
     this.updateVisuals()
   }
 
+  syncHealth(health: number, maxHealth = this.maxHealth) {
+    this.maxHealth = maxHealth
+    this.health = Phaser.Math.Clamp(health, 0, this.maxHealth)
+    this.updateVisuals()
+  }
+
   enableCollision() {
     const body = this.body as Phaser.Physics.Arcade.StaticBody
     body.enable = true
