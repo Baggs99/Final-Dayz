@@ -1,5 +1,6 @@
 import { distanceSquared, normalize, toNumber } from './math.js'
 import type {
+  DebugNavSnapshot,
   GameStateSnapshot,
   PlayerShotPayload,
   ServerBarricade,
@@ -70,6 +71,7 @@ type NavNode = {
 const entryGeometries = createEntryGeometries()
 const wallRects = createWallRects()
 const navNodes = createNavNodes()
+const graphEdges = createGraphEdges()
 
 export function createServerRoom(code: string, firstPlayer: ServerPlayer): ServerRoom {
   return {
@@ -213,11 +215,15 @@ export function getGameStateSnapshot(room: ServerRoom): GameStateSnapshot {
     hostId: room.hostId,
     players: Array.from(room.players.values()),
     barricades: Array.from(room.barricades.values()),
-    zombies: Array.from(room.zombies.values()),
+    zombies: Array.from(room.zombies.values()).map((zombie) => ({
+      ...zombie,
+      zone: isInsideBase(zombie.x, zombie.y) ? 'inside' : 'outside',
+    })),
     bullets: Array.from(room.bullets.values()),
     score: room.score,
     wave: room.wave,
     gameOver: room.gameOver,
+    debugNav: getDebugNavSnapshot(room),
   }
 }
 
@@ -605,6 +611,70 @@ function getGraphNeighbors(room: ServerRoom, nodeId: NavNodeId): NavNodeId[] {
   }
 
   return (staticEdges[nodeId] ?? []).filter((neighbor) => isGraphEdgeOpen(room, nodeId, neighbor))
+}
+
+function createGraphEdges() {
+  const staticEdges: Partial<Record<NavNodeId, NavNodeId[]>> = {
+    outsideTop: ['outsideLeft', 'outsideRight', 'doorTop'],
+    outsideBottom: ['outsideLeft', 'outsideRight', 'doorBottom'],
+    outsideLeft: ['outsideTop', 'outsideBottom', 'doorLeft'],
+    outsideRight: ['outsideTop', 'outsideBottom', 'doorRight'],
+    insideTop: ['centerInside', 'doorTop'],
+    insideBottom: ['centerInside', 'doorBottom'],
+    insideLeft: ['centerInside', 'doorLeft'],
+    insideRight: ['centerInside', 'doorRight'],
+    centerInside: ['insideTop', 'insideBottom', 'insideLeft', 'insideRight'],
+    doorTop: ['outsideTop', 'insideTop'],
+    doorBottom: ['outsideBottom', 'insideBottom'],
+    doorLeft: ['outsideLeft', 'insideLeft'],
+    doorRight: ['outsideRight', 'insideRight'],
+  }
+  const seen = new Set<string>()
+  const edges: { from: NavNodeId; to: NavNodeId }[] = []
+
+  Object.entries(staticEdges).forEach(([from, neighbors]) => {
+    neighbors?.forEach((to) => {
+      const key = [from, to].sort().join(':')
+
+      if (seen.has(key)) {
+        return
+      }
+
+      seen.add(key)
+      edges.push({ from: from as NavNodeId, to })
+    })
+  })
+
+  return edges
+}
+
+function getDebugNavSnapshot(room: ServerRoom): DebugNavSnapshot {
+  return {
+    navNodes: navNodes.map((node) => ({
+      id: node.id,
+      x: node.point.x,
+      y: node.point.y,
+      zone: node.zone,
+      entryId: node.entryId,
+    })),
+    edges: graphEdges.map((edge) => {
+      const doorwayNode = [edge.from, edge.to].find((nodeId) => nodeId.startsWith('door')) as NavNodeId | undefined
+      const entryId = doorwayNode?.replace('door', '').toLowerCase() as EntryGeometry['id'] | undefined
+
+      return {
+        from: edge.from,
+        to: edge.to,
+        open: isGraphEdgeOpen(room, edge.from, edge.to),
+        entryId,
+      }
+    }),
+    wallRects: wallRects.map((rect) => ({ ...rect })),
+    barricadeRects: entryGeometries.map((entry) => ({
+      id: entry.id,
+      ...entry.barricadeRect,
+      alive: (room.barricades.get(entry.id)?.health ?? 0) > 0,
+    })),
+  }
 }
 
 function isGraphEdgeOpen(room: ServerRoom, from: NavNodeId, to: NavNodeId) {

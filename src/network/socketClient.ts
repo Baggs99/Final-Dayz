@@ -29,6 +29,10 @@ export type NetworkZombieState = {
   targetEntryId?: string
   targetDoorwayId?: string
   currentTargetPoint?: { x: number; y: number }
+  routeNodeIds?: string[]
+  routeIndex?: number
+  stuckCount?: number
+  zone?: 'inside' | 'outside'
 }
 
 export type NetworkBarricadeState = {
@@ -50,6 +54,36 @@ export type NetworkBulletState = {
   radius: number
 }
 
+export type NetworkDebugNavState = {
+  navNodes: {
+    id: string
+    x: number
+    y: number
+    zone: 'inside' | 'outside' | 'door'
+    entryId?: NetworkBarricadeState['id']
+  }[]
+  edges: {
+    from: string
+    to: string
+    open: boolean
+    entryId?: NetworkBarricadeState['id']
+  }[]
+  wallRects: {
+    x: number
+    y: number
+    width: number
+    height: number
+  }[]
+  barricadeRects: {
+    id: NetworkBarricadeState['id']
+    x: number
+    y: number
+    width: number
+    height: number
+    alive: boolean
+  }[]
+}
+
 export type NetworkGameState = {
   roomCode: string
   phase: RoomPhase
@@ -61,6 +95,7 @@ export type NetworkGameState = {
   score: number
   wave: number
   gameOver: boolean
+  debugNav?: NetworkDebugNavState
 }
 
 export type RoomPhase = 'waitingForPlayers' | 'readyToStart' | 'fighting' | 'waveComplete' | 'shopping' | 'gameOver'

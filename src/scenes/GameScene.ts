@@ -12,6 +12,7 @@ import {
   getSocketServerUrl,
   type MultiplayerConnectionStatus,
   type NetworkBulletState,
+  type NetworkDebugNavState,
   type NetworkGameState,
   type MultiplayerSocket,
   type NetworkBarricadeState,
@@ -24,6 +25,7 @@ import {
 const DEBUG_BARRICADE_ATTACKS = false
 const DEBUG_NAV = false
 const DEBUG_MULTIPLAYER = true
+const CLIENT_DEBUG_VERSION = '0.0.0'
 
 type WasdKeys = {
   W: Phaser.Input.Keyboard.Key
@@ -139,6 +141,9 @@ export default class GameScene extends Phaser.Scene {
   private navBlocked: boolean[][] = []
   private navDebugObjects: Phaser.GameObjects.GameObject[] = []
   private navPathDebugObjects: Phaser.GameObjects.GameObject[] = []
+  private debugNavRender = false
+  private multiplayerNavDebugObjects: Phaser.GameObjects.GameObject[] = []
+  private multiplayerNavDebugText?: Phaser.GameObjects.Text
 
   constructor() {
     super('GameScene')
@@ -152,6 +157,7 @@ export default class GameScene extends Phaser.Scene {
   }
 
   create() {
+    this.debugNavRender = new URLSearchParams(window.location.search).get('debugNav') === '1'
     this.physics.world.setBounds(0, 0, this.scale.width, this.scale.height)
     this.input.mouse?.disableContextMenu()
 
@@ -938,6 +944,7 @@ export default class GameScene extends Phaser.Scene {
     this.renderServerZombies(gameState.zombies)
     this.renderServerBullets(gameState.bullets)
     this.updateMultiplayerHud(gameState)
+    this.renderMultiplayerNavDebug(gameState)
 
     if (gameState.gameOver && !this.isGameOver) {
       this.endGame()
@@ -1008,6 +1015,171 @@ export default class GameScene extends Phaser.Scene {
     view.healthBarBg.destroy()
     view.healthBarFill.destroy()
     this.serverZombies.delete(zombieId)
+  }
+
+  private renderMultiplayerNavDebug(gameState: NetworkGameState) {
+    if (!this.debugNavRender) {
+      this.clearMultiplayerNavDebug()
+      return
+    }
+
+    this.clearMultiplayerNavDebug()
+
+    const debugNav = gameState.debugNav
+
+    if (!debugNav) {
+      this.multiplayerNavDebugText = this.add
+        .text(12, this.scale.height - 24, 'debugNav=1: waiting for server debug nav data', {
+          color: '#ffdd88',
+          fontFamily: 'Arial',
+          fontSize: '12px',
+          stroke: '#000000',
+          strokeThickness: 3,
+        })
+        .setScrollFactor(0)
+        .setDepth(100)
+      return
+    }
+
+    this.drawServerBlockers(debugNav)
+    this.drawServerNavGraph(debugNav)
+    this.drawServerZombieDebug(gameState.zombies)
+    this.drawDebugSummary(gameState)
+  }
+
+  private drawServerBlockers(debugNav: NetworkDebugNavState) {
+    const graphics = this.add.graphics().setDepth(8)
+
+    graphics.fillStyle(0xff3333, 0.15)
+    graphics.lineStyle(1, 0xff7777, 0.55)
+    debugNav.wallRects.forEach((rect) => {
+      graphics.fillRect(rect.x, rect.y, rect.width, rect.height)
+      graphics.strokeRect(rect.x, rect.y, rect.width, rect.height)
+    })
+
+    debugNav.barricadeRects.forEach((rect) => {
+      graphics.fillStyle(rect.alive ? 0xffaa00 : 0x55ff55, rect.alive ? 0.2 : 0.1)
+      graphics.lineStyle(1, rect.alive ? 0xffcc55 : 0x55ff55, 0.7)
+      graphics.fillRect(rect.x, rect.y, rect.width, rect.height)
+      graphics.strokeRect(rect.x, rect.y, rect.width, rect.height)
+    })
+
+    this.multiplayerNavDebugObjects.push(graphics)
+  }
+
+  private drawServerNavGraph(debugNav: NetworkDebugNavState) {
+    const nodeById = new Map(debugNav.navNodes.map((node) => [node.id, node]))
+    const graphics = this.add.graphics().setDepth(9)
+
+    debugNav.edges.forEach((edge) => {
+      const from = nodeById.get(edge.from)
+      const to = nodeById.get(edge.to)
+
+      if (!from || !to) {
+        return
+      }
+
+      const isDoorEdge = Boolean(edge.entryId)
+      graphics.lineStyle(
+        isDoorEdge ? 2 : 1,
+        isDoorEdge ? (edge.open ? 0x63ff7a : 0xff4d4d) : 0x6ab7ff,
+        isDoorEdge ? 0.75 : 0.28,
+      )
+      graphics.lineBetween(from.x, from.y, to.x, to.y)
+    })
+
+    debugNav.navNodes.forEach((node) => {
+      const color = node.zone === 'inside' ? 0x6ab7ff : node.zone === 'door' ? 0xfff27a : 0xd28cff
+      graphics.fillStyle(color, 0.9)
+      graphics.fillCircle(node.x, node.y, 5)
+      graphics.lineStyle(1, 0x000000, 0.9)
+      graphics.strokeCircle(node.x, node.y, 5)
+
+      const label = this.add
+        .text(node.x + 8, node.y - 8, node.id, {
+          color: '#ffffff',
+          fontFamily: 'Arial',
+          fontSize: '10px',
+          stroke: '#000000',
+          strokeThickness: 3,
+        })
+        .setDepth(10)
+      this.multiplayerNavDebugObjects.push(label)
+    })
+
+    this.multiplayerNavDebugObjects.push(graphics)
+  }
+
+  private drawServerZombieDebug(zombies: NetworkZombieState[]) {
+    const graphics = this.add.graphics().setDepth(10)
+
+    zombies.forEach((zombie) => {
+      const target = zombie.currentTargetPoint
+
+      if (target) {
+        graphics.lineStyle(1, 0xffffff, 0.45)
+        graphics.lineBetween(zombie.x, zombie.y, target.x, target.y)
+        graphics.fillStyle(0xffffff, 0.9)
+        graphics.fillCircle(target.x, target.y, 4)
+      }
+
+      const routeNode = zombie.routeNodeIds?.[zombie.routeIndex ?? 0]
+      const targetLabel = routeNode ?? zombie.targetDoorwayId ?? zombie.targetEntryId ?? zombie.targetPlayerId?.slice(0, 4) ?? 'none'
+      const labelText = [
+        zombie.navState ?? 'unknown',
+        `to ${targetLabel}`,
+        `stuck ${zombie.stuckCount ?? 0}`,
+        zombie.zone ?? 'zone?',
+      ].join('\n')
+      const label = this.add
+        .text(zombie.x, zombie.y - 54, labelText, {
+          color: '#ffffff',
+          fontFamily: 'Arial',
+          fontSize: '10px',
+          align: 'center',
+          stroke: '#000000',
+          strokeThickness: 3,
+        })
+        .setOrigin(0.5)
+        .setDepth(11)
+
+      this.multiplayerNavDebugObjects.push(label)
+    })
+
+    this.multiplayerNavDebugObjects.push(graphics)
+  }
+
+  private drawDebugSummary(gameState: NetworkGameState) {
+    const aliveBarricades = gameState.barricades.filter((barricade) => barricade.health > 0).length
+
+    this.multiplayerNavDebugText = this.add
+      .text(
+        12,
+        120,
+        [
+          `Final Dayz client ${CLIENT_DEBUG_VERSION}`,
+          `server ${getSocketServerUrl()}`,
+          `room ${gameState.roomCode} phase ${gameState.phase}`,
+          `wave ${gameState.wave} zombies ${gameState.zombies.length}`,
+          `barricades ${aliveBarricades}/${gameState.barricades.length}`,
+        ].join('\n'),
+        {
+          color: '#d9f7ff',
+          fontFamily: 'Arial',
+          fontSize: '12px',
+          stroke: '#000000',
+          strokeThickness: 3,
+        },
+      )
+      .setScrollFactor(0)
+      .setDepth(100)
+  }
+
+  private clearMultiplayerNavDebug() {
+    this.multiplayerNavDebugObjects.forEach((object) => object.destroy())
+    this.multiplayerNavDebugObjects = []
+    this.multiplayerNavDebugText?.destroy()
+    this.multiplayerNavDebugText = undefined
   }
 
   private renderServerBullets(bullets: NetworkBulletState[]) {
@@ -1113,6 +1285,7 @@ export default class GameScene extends Phaser.Scene {
     this.serverZombies.clear()
     this.serverBullets.forEach((view) => view.destroy())
     this.serverBullets.clear()
+    this.clearMultiplayerNavDebug()
   }
 
   private hudTextStyle(): Phaser.Types.GameObjects.Text.TextStyle {
@@ -2131,6 +2304,7 @@ export default class GameScene extends Phaser.Scene {
     this.startOverlay?.setPosition(gameSize.width / 2, gameSize.height / 2)
     this.lobbyOverlay?.setPosition(gameSize.width / 2, gameSize.height / 2)
     this.shopOverlay?.setPosition(gameSize.width / 2, gameSize.height / 2)
+    this.multiplayerNavDebugText?.setPosition(12, 120)
 
     if (!this.isGameOver) {
       this.player.setPosition(

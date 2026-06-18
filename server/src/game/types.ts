@@ -39,6 +39,10 @@ export type ServerZombie = {
   lastStuckY: number
 }
 
+export type ServerZombieSnapshot = ServerZombie & {
+  zone: 'inside' | 'outside'
+}
+
 export type EntryPointId = 'top' | 'bottom' | 'left' | 'right'
 
 export type ServerBarricade = {
@@ -58,6 +62,36 @@ export type ServerBullet = {
   createdAt: number
   lifespanMs: number
   radius: number
+}
+
+export type DebugNavSnapshot = {
+  navNodes: {
+    id: string
+    x: number
+    y: number
+    zone: 'inside' | 'outside' | 'door'
+    entryId?: EntryPointId
+  }[]
+  edges: {
+    from: string
+    to: string
+    open: boolean
+    entryId?: EntryPointId
+  }[]
+  wallRects: {
+    x: number
+    y: number
+    width: number
+    height: number
+  }[]
+  barricadeRects: {
+    id: EntryPointId
+    x: number
+    y: number
+    width: number
+    height: number
+    alive: boolean
+  }[]
 }
 
 export type ServerRoom = {
@@ -98,11 +132,12 @@ export type GameStateSnapshot = {
   hostId: string
   players: ServerPlayer[]
   barricades: ServerBarricade[]
-  zombies: ServerZombie[]
+  zombies: ServerZombieSnapshot[]
   bullets: ServerBullet[]
   score: number
   wave: number
   gameOver: boolean
+  debugNav?: DebugNavSnapshot
 }
 
 export type RoomStateSnapshot = {
