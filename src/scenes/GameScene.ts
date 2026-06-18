@@ -22,6 +22,7 @@ import {
 
 const DEBUG_BARRICADE_ATTACKS = false
 const DEBUG_NAV = false
+const DEBUG_MULTIPLAYER = true
 
 type WasdKeys = {
   W: Phaser.Input.Keyboard.Key
@@ -723,7 +724,17 @@ export default class GameScene extends Phaser.Scene {
   }
 
   private updateLobbyState(roomState: NetworkRoomState) {
+    if (DEBUG_MULTIPLAYER) {
+      console.log(`roomStateUpdated ${roomState.roomCode}: ${roomState.phase}`)
+    }
+
     this.activeRoomCode = roomState.roomCode
+
+    if (roomState.phase === 'fighting') {
+      this.enterMultiplayerGameplay()
+      return
+    }
+
     this.lobbyRoomCodeText?.setText(`Room Code: ${roomState.roomCode}`)
     this.lobbyPlayersText?.setText(`Players: ${roomState.playerCount}/${roomState.maxPlayers}`)
 
@@ -759,11 +770,33 @@ export default class GameScene extends Phaser.Scene {
 
   private leaveMultiplayerLobby() {
     this.multiplayerSocket?.emit('leaveRoom')
-    this.lobbyOverlay?.destroy()
-    this.lobbyOverlay = undefined
+    this.hideCoopLobby()
     this.localPlayerId = undefined
     this.activeRoomCode = undefined
     this.showStartScreen()
+  }
+
+  private hideCoopLobby() {
+    if (DEBUG_MULTIPLAYER && this.lobbyOverlay) {
+      console.log('hiding co-op lobby')
+    }
+
+    this.lobbyOverlay?.destroy()
+    this.lobbyOverlay = undefined
+    this.lobbyRoomCodeText = undefined
+    this.lobbyPlayersText = undefined
+    this.lobbyStatusText = undefined
+    this.lobbyStartButton = undefined
+  }
+
+  private enterMultiplayerGameplay() {
+    this.hideCoopLobby()
+
+    if (this.isStarted && this.gameMode === 'multiplayer') {
+      return
+    }
+
+    this.startGame('multiplayer')
   }
 
   private setMultiplayerConnectionStatus(status: MultiplayerConnectionStatus, message: string) {
@@ -887,10 +920,12 @@ export default class GameScene extends Phaser.Scene {
   }
 
   private applyServerGameState(gameState: NetworkGameState) {
-    if (gameState.phase === 'fighting' && !this.isStarted) {
-      this.lobbyOverlay?.destroy()
-      this.lobbyOverlay = undefined
-      this.startGame('multiplayer')
+    if (DEBUG_MULTIPLAYER && gameState.phase === 'fighting' && this.lobbyOverlay) {
+      console.log(`gameState fighting ${gameState.roomCode}; entering multiplayer gameplay`)
+    }
+
+    if (gameState.phase === 'fighting') {
+      this.enterMultiplayerGameplay()
     }
 
     if (this.gameMode !== 'multiplayer' || !this.isStarted) {

@@ -289,6 +289,7 @@ function handleStartMultiplayerGame(socket: Socket) {
   console.log(`game started ${room.code} by ${socket.id}`)
   emitRoomState(room)
   io.to(room.code).emit('gameState', getGameStateSnapshot(room))
+  console.log(`start broadcast ${room.code}: phase=${room.phase}, players=${room.players.size}`)
 }
 
 function emitRoomState(room: ServerRoom) {
