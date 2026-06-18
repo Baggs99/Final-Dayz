@@ -7,7 +7,10 @@ import {
   createServerRoom,
   createShotBullets,
   getGameStateSnapshot,
+  getRoomStateSnapshot,
+  startRoomCombat,
   tickRoom,
+  updateRoomLobbyPhase,
   updatePlayerFromClient,
 } from './game/simulation.js'
 import type { PlayerShotPayload, ServerPlayer, ServerRoom } from './game/types.js'
@@ -51,6 +54,7 @@ io.on('connection', (socket) => {
       playerId: socket.id,
       players: getPlayers(room),
     })
+    emitRoomState(room)
   })
 
   socket.on('joinRoom', (rawRoomCode: unknown) => {
@@ -63,7 +67,7 @@ io.on('connection', (socket) => {
       return
     }
 
-    if (room.players.size >= 2 && !room.players.has(socket.id)) {
+    if (room.players.size >= room.maxPlayers && !room.players.has(socket.id)) {
       console.log(`room full ${roomCode} for ${socket.id}`)
       socket.emit('roomFull')
       return
@@ -71,6 +75,7 @@ io.on('connection', (socket) => {
 
     const player = createServerPlayer(socket.id)
     room.players.set(socket.id, player)
+    updateRoomLobbyPhase(room)
     socketRooms.set(socket.id, roomCode)
     socket.join(roomCode)
 
@@ -82,6 +87,7 @@ io.on('connection', (socket) => {
     })
     socket.to(roomCode).emit('playerJoined', player)
     io.to(roomCode).emit('playerStates', getPlayers(room))
+    emitRoomState(room)
   })
 
   socket.on('playerStateUpdate', (state: Partial<ServerPlayer>) => {
@@ -94,6 +100,10 @@ io.on('connection', (socket) => {
 
   socket.on('playerShoot', (payload: PlayerShotPayload) => {
     handlePlayerShoot(socket, payload)
+  })
+
+  socket.on('startMultiplayerGame', () => {
+    handleStartMultiplayerGame(socket)
   })
 
   socket.on('leaveRoom', () => {
@@ -110,7 +120,9 @@ setInterval(() => {
 
   rooms.forEach((room) => {
     tickRoom(room, now)
-    io.to(room.code).emit('gameState', getGameStateSnapshot(room))
+    if (room.phase === 'fighting' || room.phase === 'gameOver') {
+      io.to(room.code).emit('gameState', getGameStateSnapshot(room))
+    }
   })
 }, 50)
 
@@ -172,6 +184,14 @@ function leaveRoom(socket: Socket) {
     console.log(`room deleted ${roomCode}`)
     return
   }
+
+  if (room.hostId === socket.id) {
+    room.hostId = Array.from(room.players.keys())[0]
+    console.log(`host promoted ${roomCode}: ${room.hostId}`)
+  }
+
+  updateRoomLobbyPhase(room)
+  emitRoomState(room)
 
   io.to(roomCode).emit('playerStates', getPlayers(room))
 }
@@ -238,6 +258,41 @@ function handlePlayerShoot(socket: Socket, payload: PlayerShotPayload) {
   }
 
   socket.to(room.code).emit('playerShot', shotPayload)
+}
+
+function handleStartMultiplayerGame(socket: Socket) {
+  const room = getSocketRoom(socket)
+
+  if (!room) {
+    socket.emit('startRejected', { reason: 'Room not found.' })
+    return
+  }
+
+  if (room.hostId !== socket.id) {
+    socket.emit('startRejected', { reason: 'Only the host can start the co-op game.' })
+    return
+  }
+
+  if (room.players.size < room.maxPlayers) {
+    socket.emit('startRejected', { reason: 'Waiting for a second player.' })
+    return
+  }
+
+  if (room.phase !== 'waitingForPlayers' && room.phase !== 'readyToStart') {
+    socket.emit('startRejected', { reason: 'The room cannot be started right now.' })
+    return
+  }
+
+  const now = Date.now()
+  startRoomCombat(room, now)
+  tickRoom(room, now)
+  console.log(`game started ${room.code} by ${socket.id}`)
+  emitRoomState(room)
+  io.to(room.code).emit('gameState', getGameStateSnapshot(room))
+}
+
+function emitRoomState(room: ServerRoom) {
+  io.to(room.code).emit('roomStateUpdated', getRoomStateSnapshot(room))
 }
 
 function toNumber(value: unknown, fallback: number) {

@@ -15,6 +15,7 @@ import {
   type NetworkGameState,
   type MultiplayerSocket,
   type NetworkPlayerState,
+  type NetworkRoomState,
   type NetworkZombieState,
   type PlayerShotPayload,
 } from '../network/socketClient'
@@ -92,6 +93,11 @@ export default class GameScene extends Phaser.Scene {
   private timerText!: Phaser.GameObjects.Text
   private pauseOverlay?: Phaser.GameObjects.Text
   private startOverlay?: Phaser.GameObjects.Container
+  private lobbyOverlay?: Phaser.GameObjects.Container
+  private lobbyRoomCodeText?: Phaser.GameObjects.Text
+  private lobbyPlayersText?: Phaser.GameObjects.Text
+  private lobbyStatusText?: Phaser.GameObjects.Text
+  private lobbyStartButton?: Phaser.GameObjects.Text
   private shopOverlay?: Phaser.GameObjects.Container
   private gameOverText?: Phaser.GameObjects.Text
   private restartText?: Phaser.GameObjects.Text
@@ -581,12 +587,7 @@ export default class GameScene extends Phaser.Scene {
       this.localPlayerId = playerId
       this.activeRoomCode = roomCode
       this.renderRemotePlayers(players)
-
-      if (!this.isStarted) {
-        this.startGame('multiplayer')
-      }
-
-      this.showMessage(`Co-op room ${roomCode}`)
+      this.showLobbyOverlay()
     })
 
     socket.on('playerJoined', (player) => {
@@ -604,6 +605,8 @@ export default class GameScene extends Phaser.Scene {
     socket.on('playerStates', (players) => this.renderRemotePlayers(players))
     socket.on('playerShot', (payload) => this.handleRemoteShot(payload))
     socket.on('gameState', (payload) => this.applyServerGameState(payload))
+    socket.on('roomStateUpdated', (payload) => this.updateLobbyState(payload))
+    socket.on('startRejected', ({ reason }) => this.setLobbyStatus(reason))
     socket.on('connect_error', () => {
       this.setMultiplayerConnectionStatus(
         'connectionError',
@@ -616,6 +619,151 @@ export default class GameScene extends Phaser.Scene {
 
   private setMultiplayerStatus(message: string) {
     this.multiplayerStatusText?.setText(message)
+  }
+
+  private showLobbyOverlay() {
+    this.startOverlay?.destroy()
+    this.startOverlay = undefined
+    this.multiplayerStatusText = undefined
+    this.lobbyOverlay?.destroy()
+
+    const panel = this.add.rectangle(0, 0, 620, 390, 0x000000, 0.86)
+    const title = this.add
+      .text(0, -150, 'CO-OP LOBBY', {
+        color: '#fff2a8',
+        fontFamily: 'Arial',
+        fontSize: '36px',
+        fontStyle: 'bold',
+      })
+      .setOrigin(0.5)
+    this.lobbyRoomCodeText = this.add
+      .text(0, -86, 'Room Code: -----', {
+        align: 'center',
+        color: '#ffffff',
+        fontFamily: 'Arial',
+        fontSize: '28px',
+        stroke: '#000000',
+        strokeThickness: 4,
+      })
+      .setOrigin(0.5)
+    const instructions = this.add
+      .text(0, -44, 'Share this code with your friend.', {
+        align: 'center',
+        color: '#d9e8d9',
+        fontFamily: 'Arial',
+        fontSize: '18px',
+      })
+      .setOrigin(0.5)
+    this.lobbyPlayersText = this.add
+      .text(0, 0, 'Players: 1/2', {
+        align: 'center',
+        color: '#ffffff',
+        fontFamily: 'Arial',
+        fontSize: '22px',
+      })
+      .setOrigin(0.5)
+    this.lobbyStatusText = this.add
+      .text(0, 48, 'Waiting for friend...', {
+        align: 'center',
+        color: '#fff2a8',
+        fontFamily: 'Arial',
+        fontSize: '18px',
+        stroke: '#000000',
+        strokeThickness: 3,
+      })
+      .setOrigin(0.5)
+    this.lobbyStartButton = this.add
+      .text(0, 116, 'Waiting for friend...', {
+        backgroundColor: '#555555',
+        color: '#101316',
+        fixedWidth: 250,
+        fontFamily: 'Arial',
+        fontSize: '20px',
+        fontStyle: 'bold',
+        padding: { x: 14, y: 10 },
+      })
+      .setAlign('center')
+      .setOrigin(0.5)
+      .setInteractive({ useHandCursor: true })
+
+    this.lobbyStartButton.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+      pointer.event.stopPropagation()
+      this.multiplayerSocket?.emit('startMultiplayerGame')
+    })
+
+    const leaveButton = this.add
+      .text(0, 170, 'Leave Room', {
+        backgroundColor: '#222222',
+        color: '#ffffff',
+        fixedWidth: 160,
+        fontFamily: 'Arial',
+        fontSize: '16px',
+        padding: { x: 12, y: 8 },
+      })
+      .setAlign('center')
+      .setOrigin(0.5)
+      .setInteractive({ useHandCursor: true })
+
+    leaveButton.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+      pointer.event.stopPropagation()
+      this.leaveMultiplayerLobby()
+    })
+
+    this.lobbyOverlay = this.add.container(this.scale.width / 2, this.scale.height / 2, [
+      panel,
+      title,
+      this.lobbyRoomCodeText,
+      instructions,
+      this.lobbyPlayersText,
+      this.lobbyStatusText,
+      this.lobbyStartButton,
+      leaveButton,
+    ])
+    this.lobbyOverlay.setDepth(14)
+  }
+
+  private updateLobbyState(roomState: NetworkRoomState) {
+    this.activeRoomCode = roomState.roomCode
+    this.lobbyRoomCodeText?.setText(`Room Code: ${roomState.roomCode}`)
+    this.lobbyPlayersText?.setText(`Players: ${roomState.playerCount}/${roomState.maxPlayers}`)
+
+    const isHost = roomState.hostId === this.localPlayerId
+
+    if (!this.lobbyStartButton || !this.lobbyStatusText) {
+      return
+    }
+
+    if (!isHost) {
+      this.lobbyStartButton.setVisible(false)
+      this.setLobbyStatus('Waiting for host to start.')
+      return
+    }
+
+    this.lobbyStartButton.setVisible(true)
+
+    if (roomState.playerCount >= roomState.maxPlayers && roomState.phase === 'readyToStart') {
+      this.lobbyStartButton.setText('Start Co-op Game')
+      this.lobbyStartButton.setStyle({ backgroundColor: '#2ecc71' })
+      this.setLobbyStatus('Friend joined. Ready to start.')
+      return
+    }
+
+    this.lobbyStartButton.setText('Waiting for friend...')
+    this.lobbyStartButton.setStyle({ backgroundColor: '#555555' })
+    this.setLobbyStatus('Waiting for friend to join.')
+  }
+
+  private setLobbyStatus(message: string) {
+    this.lobbyStatusText?.setText(message)
+  }
+
+  private leaveMultiplayerLobby() {
+    this.multiplayerSocket?.emit('leaveRoom')
+    this.lobbyOverlay?.destroy()
+    this.lobbyOverlay = undefined
+    this.localPlayerId = undefined
+    this.activeRoomCode = undefined
+    this.showStartScreen()
   }
 
   private setMultiplayerConnectionStatus(status: MultiplayerConnectionStatus, message: string) {
@@ -739,7 +887,13 @@ export default class GameScene extends Phaser.Scene {
   }
 
   private applyServerGameState(gameState: NetworkGameState) {
-    if (this.gameMode !== 'multiplayer') {
+    if (gameState.phase === 'fighting' && !this.isStarted) {
+      this.lobbyOverlay?.destroy()
+      this.lobbyOverlay = undefined
+      this.startGame('multiplayer')
+    }
+
+    if (this.gameMode !== 'multiplayer' || !this.isStarted) {
       return
     }
 
@@ -887,6 +1041,8 @@ export default class GameScene extends Phaser.Scene {
     this.multiplayerSocket?.emit('leaveRoom')
     this.multiplayerSocket?.disconnect()
     this.multiplayerSocket = undefined
+    this.lobbyOverlay?.destroy()
+    this.lobbyOverlay = undefined
     this.remotePlayers.forEach((view) => {
       view.sprite.destroy()
       view.aimLine.destroy()
@@ -1917,6 +2073,7 @@ export default class GameScene extends Phaser.Scene {
     this.repairHintText?.setPosition(gameSize.width / 2, gameSize.height - 72)
     this.pauseOverlay?.setPosition(gameSize.width / 2, gameSize.height / 2)
     this.startOverlay?.setPosition(gameSize.width / 2, gameSize.height / 2)
+    this.lobbyOverlay?.setPosition(gameSize.width / 2, gameSize.height / 2)
     this.shopOverlay?.setPosition(gameSize.width / 2, gameSize.height / 2)
 
     if (!this.isGameOver) {

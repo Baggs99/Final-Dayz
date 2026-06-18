@@ -41,12 +41,25 @@ export type NetworkBulletState = {
 
 export type NetworkGameState = {
   roomCode: string
+  phase: RoomPhase
+  hostId: string
   players: NetworkPlayerState[]
   zombies: NetworkZombieState[]
   bullets: NetworkBulletState[]
   score: number
   wave: number
   gameOver: boolean
+}
+
+export type RoomPhase = 'waitingForPlayers' | 'readyToStart' | 'fighting' | 'shopping' | 'gameOver'
+
+export type NetworkRoomState = {
+  roomCode: string
+  phase: RoomPhase
+  players: NetworkPlayerState[]
+  playerCount: number
+  maxPlayers: number
+  hostId: string
 }
 
 export type PlayerShotPayload = {
@@ -74,6 +87,8 @@ type ServerToClientEvents = {
   playerStates: (players: NetworkPlayerState[]) => void
   playerShot: (payload: PlayerShotPayload) => void
   gameState: (payload: NetworkGameState) => void
+  roomStateUpdated: (payload: NetworkRoomState) => void
+  startRejected: (payload: { reason: string }) => void
 }
 
 type ClientToServerEvents = {
@@ -82,6 +97,7 @@ type ClientToServerEvents = {
   playerInput: (state: Partial<NetworkPlayerState>) => void
   playerStateUpdate: (state: Partial<NetworkPlayerState>) => void
   playerShoot: (payload: PlayerShotPayload) => void
+  startMultiplayerGame: () => void
   leaveRoom: () => void
 }
 

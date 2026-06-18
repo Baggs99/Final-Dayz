@@ -1,5 +1,7 @@
 import type { WeaponId } from './weapons.js'
 
+export type RoomPhase = 'waitingForPlayers' | 'readyToStart' | 'fighting' | 'shopping' | 'gameOver'
+
 export type ServerPlayer = {
   id: string
   x: number
@@ -40,6 +42,9 @@ export type ServerBullet = {
 
 export type ServerRoom = {
   code: string
+  hostId: string
+  maxPlayers: number
+  phase: RoomPhase
   players: Map<string, ServerPlayer>
   zombies: Map<string, ServerZombie>
   bullets: Map<string, ServerBullet>
@@ -68,10 +73,21 @@ export type PlayerShotPayload = {
 
 export type GameStateSnapshot = {
   roomCode: string
+  phase: RoomPhase
+  hostId: string
   players: ServerPlayer[]
   zombies: ServerZombie[]
   bullets: ServerBullet[]
   score: number
   wave: number
   gameOver: boolean
+}
+
+export type RoomStateSnapshot = {
+  roomCode: string
+  phase: RoomPhase
+  players: ServerPlayer[]
+  playerCount: number
+  maxPlayers: number
+  hostId: string
 }

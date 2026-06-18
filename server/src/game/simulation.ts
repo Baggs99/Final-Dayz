@@ -1,5 +1,13 @@
 import { distanceSquared, normalize, toNumber } from './math.js'
-import type { GameStateSnapshot, PlayerShotPayload, ServerBullet, ServerPlayer, ServerRoom, ServerZombie } from './types.js'
+import type {
+  GameStateSnapshot,
+  PlayerShotPayload,
+  RoomStateSnapshot,
+  ServerBullet,
+  ServerPlayer,
+  ServerRoom,
+  ServerZombie,
+} from './types.js'
 import { isWeaponId, serverWeapons } from './weapons.js'
 
 const WORLD_WIDTH = 1000
@@ -15,15 +23,18 @@ let zombieId = 0
 export function createServerRoom(code: string, firstPlayer: ServerPlayer): ServerRoom {
   return {
     code,
+    hostId: firstPlayer.id,
+    maxPlayers: 2,
+    phase: 'waitingForPlayers',
     players: new Map([[firstPlayer.id, firstPlayer]]),
     zombies: new Map(),
     bullets: new Map(),
     score: 0,
     wave: 0,
-    gameStarted: true,
+    gameStarted: false,
     gameOver: false,
     lastTick: Date.now(),
-    nextWaveAt: Date.now() + 800,
+    nextWaveAt: Number.POSITIVE_INFINITY,
     worldWidth: WORLD_WIDTH,
     worldHeight: WORLD_HEIGHT,
   }
@@ -58,7 +69,7 @@ export function updatePlayerFromClient(player: ServerPlayer, state: Partial<Serv
 }
 
 export function tickRoom(room: ServerRoom, now: number) {
-  if (!room.gameStarted || room.gameOver) {
+  if (room.phase !== 'fighting' || !room.gameStarted || room.gameOver) {
     room.lastTick = now
     return
   }
@@ -80,7 +91,7 @@ export function tickRoom(room: ServerRoom, now: number) {
 export function createShotBullets(room: ServerRoom, playerId: string, payload: PlayerShotPayload, now: number) {
   const player = room.players.get(playerId)
 
-  if (!player || !player.alive || room.gameOver) {
+  if (!player || !player.alive || room.phase !== 'fighting' || room.gameOver) {
     return false
   }
 
@@ -128,6 +139,8 @@ export function createShotBullets(room: ServerRoom, playerId: string, payload: P
 export function getGameStateSnapshot(room: ServerRoom): GameStateSnapshot {
   return {
     roomCode: room.code,
+    phase: room.phase,
+    hostId: room.hostId,
     players: Array.from(room.players.values()),
     zombies: Array.from(room.zombies.values()),
     bullets: Array.from(room.bullets.values()),
@@ -135,6 +148,43 @@ export function getGameStateSnapshot(room: ServerRoom): GameStateSnapshot {
     wave: room.wave,
     gameOver: room.gameOver,
   }
+}
+
+export function getRoomStateSnapshot(room: ServerRoom): RoomStateSnapshot {
+  return {
+    roomCode: room.code,
+    phase: room.phase,
+    players: Array.from(room.players.values()),
+    playerCount: room.players.size,
+    maxPlayers: room.maxPlayers,
+    hostId: room.hostId,
+  }
+}
+
+export function updateRoomLobbyPhase(room: ServerRoom) {
+  if (room.phase === 'fighting' || room.phase === 'shopping' || room.phase === 'gameOver') {
+    return
+  }
+
+  room.phase = room.players.size >= room.maxPlayers ? 'readyToStart' : 'waitingForPlayers'
+}
+
+export function startRoomCombat(room: ServerRoom, now: number) {
+  room.phase = 'fighting'
+  room.gameStarted = true
+  room.gameOver = false
+  room.score = 0
+  room.wave = 0
+  room.zombies.clear()
+  room.bullets.clear()
+  room.nextWaveAt = now
+  room.lastTick = now
+
+  room.players.forEach((player) => {
+    player.health = 100
+    player.alive = true
+    player.lastDamagedAt = 0
+  })
 }
 
 function maybeStartNextWave(room: ServerRoom, now: number) {
@@ -272,5 +322,6 @@ function checkGameOver(room: ServerRoom) {
 
   if (players.length > 0 && players.every((player) => !player.alive)) {
     room.gameOver = true
+    room.phase = 'gameOver'
   }
 }
