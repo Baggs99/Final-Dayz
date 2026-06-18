@@ -10,8 +10,24 @@ type PlayerState = {
   rotation: number
   aimX: number
   aimY: number
+  weaponId: WeaponId
   weapon: string
   connected: boolean
+}
+
+type WeaponId = 'pistol' | 'smg' | 'shotgun'
+
+type PlayerShotPayload = {
+  roomCode?: string
+  playerId?: string
+  x?: number
+  y?: number
+  aimX?: number
+  aimY?: number
+  rotation?: number
+  weaponId?: WeaponId
+  weapon?: string
+  timestamp?: number
 }
 
 type Room = {
@@ -20,12 +36,19 @@ type Room = {
 }
 
 const PORT = Number(process.env.PORT) || 3001
-const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || 'http://localhost:5173'
+const DEFAULT_CLIENT_ORIGINS = ['http://localhost:5173', 'https://zombie.baglini.co']
+const allowedOrigins = parseAllowedOrigins(process.env.CLIENT_ORIGIN)
 const rooms = new Map<string, Room>()
 const socketRooms = new Map<string, string>()
+const lastShotAtBySocket = new Map<string, number>()
+const weaponFireRates: Record<WeaponId, { name: string; fireRateMs: number }> = {
+  pistol: { name: 'Pistol', fireRateMs: 220 },
+  smg: { name: 'SMG', fireRateMs: 75 },
+  shotgun: { name: 'Shotgun', fireRateMs: 650 },
+}
 
 const app = express()
-app.use(cors({ origin: CLIENT_ORIGIN }))
+app.use(cors({ origin: validateCorsOrigin }))
 app.get('/health', (_req, res) => {
   res.json({ ok: true })
 })
@@ -33,7 +56,7 @@ app.get('/health', (_req, res) => {
 const httpServer = createServer(app)
 const io = new Server(httpServer, {
   cors: {
-    origin: CLIENT_ORIGIN,
+    origin: validateCorsOrigin,
     methods: ['GET', 'POST'],
   },
 })
@@ -51,6 +74,7 @@ io.on('connection', (socket) => {
     socketRooms.set(socket.id, roomCode)
     socket.join(roomCode)
 
+    console.log(`room created ${roomCode} by ${socket.id}`)
     socket.emit('roomCreated', { roomCode, playerId: socket.id })
     socket.emit('roomJoined', {
       roomCode,
@@ -64,11 +88,13 @@ io.on('connection', (socket) => {
     const room = rooms.get(roomCode)
 
     if (!room) {
+      console.log(`room not found ${roomCode} for ${socket.id}`)
       socket.emit('roomNotFound')
       return
     }
 
     if (room.players.size >= 2 && !room.players.has(socket.id)) {
+      console.log(`room full ${roomCode} for ${socket.id}`)
       socket.emit('roomFull')
       return
     }
@@ -78,6 +104,7 @@ io.on('connection', (socket) => {
     socketRooms.set(socket.id, roomCode)
     socket.join(roomCode)
 
+    console.log(`player joined ${roomCode}: ${socket.id}`)
     socket.emit('roomJoined', {
       roomCode,
       playerId: socket.id,
@@ -95,6 +122,10 @@ io.on('connection', (socket) => {
     updatePlayerState(socket, state)
   })
 
+  socket.on('playerShoot', (payload: PlayerShotPayload) => {
+    handlePlayerShoot(socket, payload)
+  })
+
   socket.on('leaveRoom', () => {
     leaveRoom(socket)
   })
@@ -106,6 +137,8 @@ io.on('connection', (socket) => {
 
 httpServer.listen(PORT, () => {
   console.log(`Final Dayz multiplayer server listening on ${PORT}`)
+  console.log(`Allowed client origins: ${allowedOrigins.join(', ')}`)
+  console.log(`Health check: http://localhost:${PORT}/health`)
 })
 
 function createPlayerState(id: string): PlayerState {
@@ -117,6 +150,7 @@ function createPlayerState(id: string): PlayerState {
     aimX: 0,
     aimY: 0,
     weapon: 'Pistol',
+    weaponId: 'pistol',
     connected: true,
   }
 }
@@ -157,6 +191,7 @@ function leaveRoom(socket: Socket) {
 
   const room = rooms.get(roomCode)
   socketRooms.delete(socket.id)
+  lastShotAtBySocket.delete(socket.id)
   socket.leave(roomCode)
 
   if (!room) {
@@ -164,10 +199,12 @@ function leaveRoom(socket: Socket) {
   }
 
   room.players.delete(socket.id)
+  console.log(`player left ${roomCode}: ${socket.id}`)
   socket.to(roomCode).emit('playerLeft', { playerId: socket.id })
 
   if (room.players.size === 0) {
     rooms.delete(roomCode)
+    console.log(`room deleted ${roomCode}`)
     return
   }
 
@@ -192,12 +229,78 @@ function updatePlayerState(socket: Socket, state: Partial<PlayerState>) {
   player.rotation = toNumber(state.rotation, player.rotation)
   player.aimX = toNumber(state.aimX, player.aimX)
   player.aimY = toNumber(state.aimY, player.aimY)
+  player.weaponId = isWeaponId(state.weaponId) ? state.weaponId : player.weaponId
   player.weapon = typeof state.weapon === 'string' ? state.weapon : player.weapon
   player.connected = true
 
   io.to(room.code).emit('playerStates', getPlayers(room))
 }
 
+function handlePlayerShoot(socket: Socket, payload: PlayerShotPayload) {
+  const room = getSocketRoom(socket)
+
+  if (!room) {
+    return
+  }
+
+  const player = room.players.get(socket.id)
+
+  if (!player) {
+    return
+  }
+
+  const weaponId = isWeaponId(payload.weaponId) ? payload.weaponId : player.weaponId
+  const weapon = weaponFireRates[weaponId]
+  const now = Date.now()
+  const lastShotAt = lastShotAtBySocket.get(socket.id) ?? 0
+  const minInterval = Math.max(50, weapon.fireRateMs - 20)
+
+  if (now - lastShotAt < minInterval) {
+    return
+  }
+
+  lastShotAtBySocket.set(socket.id, now)
+
+  const shotPayload = {
+    roomCode: room.code,
+    playerId: socket.id,
+    x: toNumber(payload.x, player.x),
+    y: toNumber(payload.y, player.y),
+    aimX: toNumber(payload.aimX, player.aimX),
+    aimY: toNumber(payload.aimY, player.aimY),
+    rotation: toNumber(payload.rotation, player.rotation),
+    weaponId,
+    weapon: typeof payload.weapon === 'string' ? payload.weapon : weapon.name,
+    timestamp: toNumber(payload.timestamp, now),
+  }
+
+  socket.to(room.code).emit('playerShot', shotPayload)
+}
+
 function toNumber(value: unknown, fallback: number) {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
+
+function isWeaponId(value: unknown): value is WeaponId {
+  return value === 'pistol' || value === 'smg' || value === 'shotgun'
+}
+
+function parseAllowedOrigins(value: string | undefined) {
+  if (!value) {
+    return DEFAULT_CLIENT_ORIGINS
+  }
+
+  return value
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean)
+}
+
+function validateCorsOrigin(origin: string | undefined, callback: (error: Error | null, allow?: boolean) => void) {
+  if (!origin || allowedOrigins.includes(origin)) {
+    callback(null, true)
+    return
+  }
+
+  callback(new Error(`Origin not allowed by CORS: ${origin}`), false)
 }

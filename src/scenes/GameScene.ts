@@ -9,8 +9,11 @@ import Player from '../entities/Player'
 import Zombie from '../entities/Zombie'
 import {
   createMultiplayerSocket,
+  getSocketServerUrl,
+  type MultiplayerConnectionStatus,
   type MultiplayerSocket,
   type NetworkPlayerState,
+  type PlayerShotPayload,
 } from '../network/socketClient'
 
 const DEBUG_BARRICADE_ATTACKS = false
@@ -109,6 +112,7 @@ export default class GameScene extends Phaser.Scene {
   private remotePlayers = new Map<string, RemotePlayerView>()
   private lastNetworkSendAt = 0
   private multiplayerStatusText?: Phaser.GameObjects.Text
+  private multiplayerConnectionStatus: MultiplayerConnectionStatus = 'disconnected'
   private lastPlayerZone: BaseZone = 'inside'
   private navCellSize = 32
   private navCols = 0
@@ -498,9 +502,9 @@ export default class GameScene extends Phaser.Scene {
   }
 
   private createCoopRoom() {
-    this.setMultiplayerStatus('Connecting to co-op server...')
+    this.setMultiplayerConnectionStatus('connecting', `Connecting to multiplayer server at ${getSocketServerUrl()}...`)
     this.connectMultiplayerSocket((socket) => {
-      this.setMultiplayerStatus('Creating room...')
+      this.setMultiplayerConnectionStatus('connected', 'Connected. Creating room...')
       socket.emit('createRoom')
     })
   }
@@ -512,9 +516,9 @@ export default class GameScene extends Phaser.Scene {
       return
     }
 
-    this.setMultiplayerStatus('Connecting to co-op server...')
+    this.setMultiplayerConnectionStatus('connecting', `Connecting to multiplayer server at ${getSocketServerUrl()}...`)
     this.connectMultiplayerSocket((socket) => {
-      this.setMultiplayerStatus(`Joining ${roomCode.trim().toUpperCase()}...`)
+      this.setMultiplayerConnectionStatus('connected', `Connected. Joining ${roomCode.trim().toUpperCase()}...`)
       socket.emit('joinRoom', roomCode)
     })
   }
@@ -538,6 +542,14 @@ export default class GameScene extends Phaser.Scene {
 
     const socket = createMultiplayerSocket()
     this.multiplayerSocket = socket
+
+    socket.on('connect', () => {
+      this.setMultiplayerConnectionStatus('connected', 'Connected to multiplayer server.')
+    })
+
+    socket.on('disconnect', () => {
+      this.setMultiplayerConnectionStatus('disconnected', 'Disconnected from multiplayer server.')
+    })
 
     socket.on('roomCreated', ({ roomCode }) => {
       this.activeRoomCode = roomCode
@@ -569,7 +581,13 @@ export default class GameScene extends Phaser.Scene {
     socket.on('roomFull', () => this.setMultiplayerStatus('That room is full.'))
     socket.on('roomNotFound', () => this.setMultiplayerStatus('Room not found.'))
     socket.on('playerStates', (players) => this.renderRemotePlayers(players))
-    socket.on('connect_error', () => this.setMultiplayerStatus('Could not connect. Single Player still works.'))
+    socket.on('playerShot', (payload) => this.handleRemoteShot(payload))
+    socket.on('connect_error', () => {
+      this.setMultiplayerConnectionStatus(
+        'connectionError',
+        'Could not connect to multiplayer server. Try again or play single-player.',
+      )
+    })
 
     return socket
   }
@@ -578,20 +596,130 @@ export default class GameScene extends Phaser.Scene {
     this.multiplayerStatusText?.setText(message)
   }
 
+  private setMultiplayerConnectionStatus(status: MultiplayerConnectionStatus, message: string) {
+    this.multiplayerConnectionStatus = status
+    this.setMultiplayerStatus(`${this.getMultiplayerStatusLabel()}: ${message}`)
+  }
+
+  private getMultiplayerStatusLabel() {
+    if (this.multiplayerConnectionStatus === 'connectionError') {
+      return 'Connection error'
+    }
+
+    return this.multiplayerConnectionStatus
+  }
+
   private sendMultiplayerState(time: number) {
     if (this.gameMode !== 'multiplayer' || !this.multiplayerSocket?.connected || time - this.lastNetworkSendAt < 50) {
       return
     }
 
     this.lastNetworkSendAt = time
+    this.emitMultiplayerStateNow()
+  }
+
+  private emitMultiplayerStateNow() {
+    if (this.gameMode !== 'multiplayer' || !this.multiplayerSocket?.connected) {
+      return
+    }
+
     this.multiplayerSocket.emit('playerStateUpdate', {
       x: this.player.x,
       y: this.player.y,
       rotation: this.player.rotation,
       aimX: this.input.activePointer.worldX,
       aimY: this.input.activePointer.worldY,
+      weaponId: this.currentWeaponId,
       weapon: this.currentWeapon.name,
     })
+  }
+
+  private emitLocalShot(aimX: number, aimY: number) {
+    if (this.gameMode !== 'multiplayer' || !this.multiplayerSocket?.connected || !this.localPlayerId) {
+      return
+    }
+
+    this.multiplayerSocket.emit('playerShoot', {
+      roomCode: this.activeRoomCode,
+      playerId: this.localPlayerId,
+      x: this.player.x,
+      y: this.player.y,
+      aimX,
+      aimY,
+      rotation: this.player.rotation,
+      weaponId: this.currentWeaponId,
+      weapon: this.currentWeapon.name,
+      timestamp: Date.now(),
+    })
+  }
+
+  private handleRemoteShot(payload: PlayerShotPayload) {
+    if (payload.playerId === this.localPlayerId) {
+      return
+    }
+
+    this.spawnRemoteBulletVisuals(payload)
+  }
+
+  private spawnRemoteBulletVisuals(payload: PlayerShotPayload) {
+    const weapon = weapons[payload.weaponId] ?? weapons.pistol
+    const baseAngle = this.getAimAngle(payload.x, payload.y, payload.aimX, payload.aimY, payload.rotation)
+    const spreadRadians = Phaser.Math.DegToRad(weapon.spreadDegrees)
+    const firstShotOffset = weapon.bulletsPerShot > 1 ? -spreadRadians / 2 : 0
+    const angleStep = weapon.bulletsPerShot > 1 ? spreadRadians / (weapon.bulletsPerShot - 1) : 0
+
+    this.createMuzzleFlash(payload.x, payload.y, baseAngle, 0xffc857)
+
+    for (let i = 0; i < weapon.bulletsPerShot; i += 1) {
+      const shotAngle = baseAngle + firstShotOffset + angleStep * i
+      const directionX = Math.cos(shotAngle)
+      const directionY = Math.sin(shotAngle)
+      const spawnOffset = 28
+      const bullet = this.physics.add.sprite(
+        payload.x + directionX * spawnOffset,
+        payload.y + directionY * spawnOffset,
+        'bullet',
+      )
+      const body = bullet.body as Phaser.Physics.Arcade.Body
+
+      bullet.setDepth(2)
+      bullet.setRotation(shotAngle)
+      bullet.setTint(0xffc857)
+      body.setCircle(4)
+      body.setVelocity(directionX * weapon.bulletSpeed, directionY * weapon.bulletSpeed)
+
+      this.time.delayedCall(900, () => bullet.destroy())
+    }
+  }
+
+  private createMuzzleFlash(x: number, y: number, angle: number, color = 0xfff2a8) {
+    const distance = 32
+    const flash = this.add.circle(
+      x + Math.cos(angle) * distance,
+      y + Math.sin(angle) * distance,
+      7,
+      color,
+      0.95,
+    )
+
+    flash.setDepth(5)
+    this.tweens.add({
+      targets: flash,
+      alpha: 0,
+      scale: 1.8,
+      duration: 90,
+      onComplete: () => flash.destroy(),
+    })
+  }
+
+  private getAimAngle(x: number, y: number, aimX: number, aimY: number, fallbackRotation: number) {
+    const direction = new Phaser.Math.Vector2(aimX - x, aimY - y)
+
+    if (direction.lengthSq() === 0) {
+      return fallbackRotation
+    }
+
+    return Math.atan2(direction.y, direction.x)
   }
 
   private renderRemotePlayers(players: NetworkPlayerState[]) {
@@ -601,10 +729,11 @@ export default class GameScene extends Phaser.Scene {
       }
 
       const view = this.getRemotePlayerView(player.id)
+      const aimAngle = this.getAimAngle(player.x, player.y, player.aimX, player.aimY, player.rotation)
       view.sprite.setPosition(player.x, player.y)
-      view.sprite.setRotation(player.rotation)
+      view.sprite.setRotation(aimAngle)
       view.aimLine.setPosition(player.x, player.y)
-      view.aimLine.setRotation(player.rotation)
+      view.aimLine.setRotation(aimAngle)
       view.label.setPosition(player.x, player.y - 34)
       view.label.setText(player.weapon || 'Co-op')
     })
@@ -774,6 +903,7 @@ export default class GameScene extends Phaser.Scene {
 
     this.currentWeaponId = weaponId
     this.weaponText.setText(`Weapon ${this.currentWeapon.name}`)
+    this.emitMultiplayerStateNow()
   }
 
   private updateRepairInteraction() {
@@ -831,6 +961,8 @@ export default class GameScene extends Phaser.Scene {
     const firstShotOffset = weapon.bulletsPerShot > 1 ? -spreadRadians / 2 : 0
     const angleStep = weapon.bulletsPerShot > 1 ? spreadRadians / (weapon.bulletsPerShot - 1) : 0
 
+    this.createMuzzleFlash(this.player.x, this.player.y, baseAngle)
+
     for (let i = 0; i < weapon.bulletsPerShot; i += 1) {
       const randomSpread = weapon.bulletsPerShot === 1 ? Phaser.Math.FloatBetween(-spreadRadians / 2, spreadRadians / 2) : 0
       const shotAngle = baseAngle + firstShotOffset + angleStep * i + randomSpread
@@ -842,6 +974,8 @@ export default class GameScene extends Phaser.Scene {
       this.bullets.add(bullet)
       bullet.launch(shotDirection.x, shotDirection.y)
     }
+
+    this.emitLocalShot(mouseWorldPoint.x, mouseWorldPoint.y)
   }
 
   private togglePause() {

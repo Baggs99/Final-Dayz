@@ -15,6 +15,12 @@ The server defaults to `http://localhost:3001` and exposes:
 GET /health
 ```
 
+Default local CORS origin:
+
+```text
+http://localhost:5173
+```
+
 ## Render Deployment
 
 Use these Render settings:
@@ -28,7 +34,22 @@ Start Command: npm start
 Environment variables:
 
 ```text
-CLIENT_ORIGIN=<deployed client URL>
+CLIENT_ORIGIN=https://zombie.baglini.co
+```
+
+`CLIENT_ORIGIN` supports comma-separated values. To allow both production and local development against the same server:
+
+```text
+CLIENT_ORIGIN=https://zombie.baglini.co,http://localhost:5173
 ```
 
 The server binds to `process.env.PORT`, which Render provides automatically.
+
+## Smoke Test
+
+- Start the server with `npm run dev`.
+- Start the client from the project root with `npm run dev`.
+- Open two browser tabs at `http://localhost:5173`.
+- Create a co-op room in tab A.
+- Join the room code in tab B.
+- Confirm both player circles move in real time.
