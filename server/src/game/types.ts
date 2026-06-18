@@ -30,6 +30,9 @@ export type ServerZombie = {
   targetEntryId?: EntryPointId
   targetDoorwayId?: EntryPointId
   currentTargetPoint?: { x: number; y: number }
+  routeNodeIds: string[]
+  routeIndex: number
+  stuckCount: number
   lastAttackAt: number
   lastStuckCheckAt: number
   lastStuckX: number

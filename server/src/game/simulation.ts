@@ -46,9 +46,30 @@ type EntryGeometry = {
   attackZone: Rect
   barricadeRect: Rect
 }
+type NavNodeId =
+  | 'outsideTop'
+  | 'outsideBottom'
+  | 'outsideLeft'
+  | 'outsideRight'
+  | 'doorTop'
+  | 'doorBottom'
+  | 'doorLeft'
+  | 'doorRight'
+  | 'insideTop'
+  | 'insideBottom'
+  | 'insideLeft'
+  | 'insideRight'
+  | 'centerInside'
+type NavNode = {
+  id: NavNodeId
+  point: Point
+  zone: 'inside' | 'outside' | 'door'
+  entryId?: EntryGeometry['id']
+}
 
 const entryGeometries = createEntryGeometries()
 const wallRects = createWallRects()
+const navNodes = createNavNodes()
 
 export function createServerRoom(code: string, firstPlayer: ServerPlayer): ServerRoom {
   return {
@@ -304,6 +325,9 @@ function createZombie(room: ServerRoom, health: number, speed: number): ServerZo
     speed,
     radius: 17,
     navState: 'chasingDirect',
+    routeNodeIds: [],
+    routeIndex: 0,
+    stuckCount: 0,
     lastAttackAt: 0,
     lastStuckCheckAt: 0,
     lastStuckX: x,
@@ -367,30 +391,36 @@ function getZombieMoveTarget(room: ServerRoom, zombie: ServerZombie, target: Ser
   const playerInside = isInsideBase(target.x, target.y)
 
   if (zombieInside && playerInside) {
+    clearZombieRoute(zombie)
     setZombieTarget(zombie, 'chasingDirect', target)
     return target
   }
 
   if (!zombieInside && !playerInside) {
     if (lineIntersectsBase(zombie.x, zombie.y, target.x, target.y)) {
-      const waypoint = getExteriorWaypointAroundBase(zombie.x, zombie.y, target.x, target.y)
-      setZombieTarget(zombie, 'routingToDoorway', waypoint)
-      return waypoint
+      const routeTarget = getGraphRouteTarget(room, zombie, target, 'outside', 'outside')
+
+      if (routeTarget) {
+        return routeTarget
+      }
     }
 
+    clearZombieRoute(zombie)
     setZombieTarget(zombie, 'chasingDirect', target)
     return target
   }
 
   const direction = zombieInside ? 'insideToOutside' : 'outsideToInside'
-  const openEntry = getNearestOpenEntry(room, zombie, direction)
+  const routeTarget = getGraphRouteTarget(
+    room,
+    zombie,
+    target,
+    direction === 'outsideToInside' ? 'outside' : 'inside',
+    direction === 'outsideToInside' ? 'inside' : 'outside',
+  )
 
-  if (openEntry) {
-    const routeTarget = getRouteTarget(zombie, openEntry, direction)
-    zombie.targetDoorwayId = openEntry.id
-    zombie.targetEntryId = undefined
-    setZombieTarget(zombie, 'routingToDoorway', getSafeExteriorTarget(zombie, routeTarget))
-    return zombie.currentTargetPoint
+  if (routeTarget) {
+    return routeTarget
   }
 
   const barricadeEntry = getNearestAliveEntry(room, zombie, direction)
@@ -421,6 +451,7 @@ function moveZombieToward(room: ServerRoom, zombie: ServerZombie, target: Point,
   if (canMoveTo(room, zombie, nextX, nextY)) {
     zombie.x = nextX
     zombie.y = nextY
+    zombie.stuckCount = 0
     return
   }
 
@@ -436,14 +467,155 @@ function moveZombieToward(room: ServerRoom, zombie: ServerZombie, target: Point,
       zombie.y = nextY
     }
 
+    zombie.stuckCount = 0
     return
   }
 
   zombie.navState = 'stuck'
+  clearZombieRoute(zombie)
 
   if (DEBUG_MULTIPLAYER_SIM) {
       console.log(`zombie blocked ${zombie.id} at ${Math.round(nextX)},${Math.round(nextY)}`)
   }
+}
+
+function getGraphRouteTarget(
+  room: ServerRoom,
+  zombie: ServerZombie,
+  target: Point,
+  startZone: 'inside' | 'outside',
+  endZone: 'inside' | 'outside',
+): Point | undefined {
+  const startNode = getNearestNavNode(zombie, startZone)
+  const endNode = getNearestNavNode(target, endZone)
+
+  if (!startNode || !endNode) {
+    return undefined
+  }
+
+  const currentRouteKey = `${startNode.id}:${endNode.id}`
+
+  if (zombie.routeNodeIds[0] !== currentRouteKey) {
+    const path = findGraphPath(room, startNode.id, endNode.id)
+
+    if (path.length === 0) {
+      clearZombieRoute(zombie)
+      return undefined
+    }
+
+    zombie.routeNodeIds = [currentRouteKey, ...path]
+    zombie.routeIndex = 1
+    zombie.targetEntryId = undefined
+    zombie.targetDoorwayId = path.find((nodeId) => nodeId.startsWith('door'))?.replace('door', '').toLowerCase() as EntryGeometry['id'] | undefined
+
+    if (DEBUG_MULTIPLAYER_SIM) {
+      console.log(`zombie route ${zombie.id}: ${path.join(' -> ')}`)
+    }
+  }
+
+  while (zombie.routeIndex < zombie.routeNodeIds.length) {
+    const node = getNavNode(zombie.routeNodeIds[zombie.routeIndex] as NavNodeId)
+
+    if (!node) {
+      zombie.routeIndex += 1
+      continue
+    }
+
+    if (!isNearPoint(zombie, node.point, 50)) {
+      setZombieTarget(zombie, 'routingToDoorway', node.point)
+      return zombie.currentTargetPoint
+    }
+
+    zombie.routeIndex += 1
+  }
+
+  clearZombieRoute(zombie)
+  return undefined
+}
+
+function clearZombieRoute(zombie: ServerZombie) {
+  zombie.routeNodeIds = []
+  zombie.routeIndex = 0
+  zombie.targetDoorwayId = undefined
+}
+
+function getNearestNavNode(point: Point, zone: 'inside' | 'outside') {
+  return navNodes
+    .filter((node) => node.zone === zone)
+    .slice()
+    .sort((a, b) => distanceSquared(point.x, point.y, a.point.x, a.point.y) - distanceSquared(point.x, point.y, b.point.x, b.point.y))[0]
+}
+
+function getNavNode(nodeId: NavNodeId) {
+  return navNodes.find((node) => node.id === nodeId)
+}
+
+function findGraphPath(room: ServerRoom, startId: NavNodeId, endId: NavNodeId) {
+  const queue: NavNodeId[] = [startId]
+  const cameFrom = new Map<NavNodeId, NavNodeId | undefined>([[startId, undefined]])
+
+  while (queue.length > 0) {
+    const current = queue.shift()!
+
+    if (current === endId) {
+      break
+    }
+
+    getGraphNeighbors(room, current).forEach((neighbor) => {
+      if (cameFrom.has(neighbor)) {
+        return
+      }
+
+      cameFrom.set(neighbor, current)
+      queue.push(neighbor)
+    })
+  }
+
+  if (!cameFrom.has(endId)) {
+    return []
+  }
+
+  const path: NavNodeId[] = []
+  let current: NavNodeId | undefined = endId
+
+  while (current) {
+    path.push(current)
+    current = cameFrom.get(current)
+  }
+
+  path.reverse()
+  return path
+}
+
+function getGraphNeighbors(room: ServerRoom, nodeId: NavNodeId): NavNodeId[] {
+  const staticEdges: Partial<Record<NavNodeId, NavNodeId[]>> = {
+    outsideTop: ['outsideLeft', 'outsideRight', 'doorTop'],
+    outsideBottom: ['outsideLeft', 'outsideRight', 'doorBottom'],
+    outsideLeft: ['outsideTop', 'outsideBottom', 'doorLeft'],
+    outsideRight: ['outsideTop', 'outsideBottom', 'doorRight'],
+    insideTop: ['centerInside', 'doorTop'],
+    insideBottom: ['centerInside', 'doorBottom'],
+    insideLeft: ['centerInside', 'doorLeft'],
+    insideRight: ['centerInside', 'doorRight'],
+    centerInside: ['insideTop', 'insideBottom', 'insideLeft', 'insideRight'],
+    doorTop: ['outsideTop', 'insideTop'],
+    doorBottom: ['outsideBottom', 'insideBottom'],
+    doorLeft: ['outsideLeft', 'insideLeft'],
+    doorRight: ['outsideRight', 'insideRight'],
+  }
+
+  return (staticEdges[nodeId] ?? []).filter((neighbor) => isGraphEdgeOpen(room, nodeId, neighbor))
+}
+
+function isGraphEdgeOpen(room: ServerRoom, from: NavNodeId, to: NavNodeId) {
+  const doorwayNode = [from, to].find((nodeId) => nodeId.startsWith('door')) as NavNodeId | undefined
+
+  if (!doorwayNode) {
+    return true
+  }
+
+  const entryId = doorwayNode.replace('door', '').toLowerCase() as EntryGeometry['id']
+  return (room.barricades.get(entryId)?.health ?? 0) <= 0
 }
 
 function getRouteTarget(
@@ -546,10 +718,13 @@ function updateZombieStuckState(room: ServerRoom, zombie: ServerZombie, target: 
   zombie.lastStuckY = zombie.y
 
   if (moved >= STUCK_DISTANCE_THRESHOLD) {
+    zombie.stuckCount = 0
     return
   }
 
   zombie.navState = 'stuck'
+  zombie.stuckCount += 1
+  clearZombieRoute(zombie)
 
   const nearbyEntry = entryGeometries.find((entry) => {
     const barricade = room.barricades.get(entry.id)
@@ -642,6 +817,29 @@ function createEntryGeometries(): EntryGeometry[] {
       attackZone: { x: centerX + roomWidth / 2 - 24, y: centerY - attackWidth / 2, width: attackDepth + 24, height: attackWidth },
       barricadeRect: rectFromCenter(centerX + roomWidth / 2, centerY, 18, 96),
     },
+  ]
+}
+
+function createNavNodes(): NavNode[] {
+  const top = entryGeometries.find((entry) => entry.id === 'top')!
+  const bottom = entryGeometries.find((entry) => entry.id === 'bottom')!
+  const left = entryGeometries.find((entry) => entry.id === 'left')!
+  const right = entryGeometries.find((entry) => entry.id === 'right')!
+
+  return [
+    { id: 'outsideTop', point: top.outsidePoint, zone: 'outside', entryId: 'top' },
+    { id: 'outsideBottom', point: bottom.outsidePoint, zone: 'outside', entryId: 'bottom' },
+    { id: 'outsideLeft', point: left.outsidePoint, zone: 'outside', entryId: 'left' },
+    { id: 'outsideRight', point: right.outsidePoint, zone: 'outside', entryId: 'right' },
+    { id: 'doorTop', point: top.doorwayPoint, zone: 'door', entryId: 'top' },
+    { id: 'doorBottom', point: bottom.doorwayPoint, zone: 'door', entryId: 'bottom' },
+    { id: 'doorLeft', point: left.doorwayPoint, zone: 'door', entryId: 'left' },
+    { id: 'doorRight', point: right.doorwayPoint, zone: 'door', entryId: 'right' },
+    { id: 'insideTop', point: top.insidePoint, zone: 'inside', entryId: 'top' },
+    { id: 'insideBottom', point: bottom.insidePoint, zone: 'inside', entryId: 'bottom' },
+    { id: 'insideLeft', point: left.insidePoint, zone: 'inside', entryId: 'left' },
+    { id: 'insideRight', point: right.insidePoint, zone: 'inside', entryId: 'right' },
+    { id: 'centerInside', point: { x: WORLD_WIDTH / 2, y: WORLD_HEIGHT / 2 }, zone: 'inside' },
   ]
 }
 
