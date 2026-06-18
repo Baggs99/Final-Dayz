@@ -11,6 +11,42 @@ export type NetworkPlayerState = {
   weaponId: WeaponId
   weapon: string
   connected: boolean
+  health: number
+  alive: boolean
+  lastDamagedAt: number
+}
+
+export type NetworkZombieState = {
+  id: string
+  x: number
+  y: number
+  health: number
+  maxHealth: number
+  speed: number
+  radius: number
+}
+
+export type NetworkBulletState = {
+  id: string
+  ownerId: string
+  x: number
+  y: number
+  vx: number
+  vy: number
+  damage: number
+  createdAt: number
+  lifespanMs: number
+  radius: number
+}
+
+export type NetworkGameState = {
+  roomCode: string
+  players: NetworkPlayerState[]
+  zombies: NetworkZombieState[]
+  bullets: NetworkBulletState[]
+  score: number
+  wave: number
+  gameOver: boolean
 }
 
 export type PlayerShotPayload = {
@@ -37,6 +73,7 @@ type ServerToClientEvents = {
   roomNotFound: () => void
   playerStates: (players: NetworkPlayerState[]) => void
   playerShot: (payload: PlayerShotPayload) => void
+  gameState: (payload: NetworkGameState) => void
 }
 
 type ClientToServerEvents = {

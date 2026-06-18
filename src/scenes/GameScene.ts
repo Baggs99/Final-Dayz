@@ -11,8 +11,11 @@ import {
   createMultiplayerSocket,
   getSocketServerUrl,
   type MultiplayerConnectionStatus,
+  type NetworkBulletState,
+  type NetworkGameState,
   type MultiplayerSocket,
   type NetworkPlayerState,
+  type NetworkZombieState,
   type PlayerShotPayload,
 } from '../network/socketClient'
 
@@ -54,6 +57,12 @@ type RemotePlayerView = {
   sprite: Phaser.GameObjects.Sprite
   aimLine: Phaser.GameObjects.Rectangle
   label: Phaser.GameObjects.Text
+}
+
+type ServerZombieView = {
+  sprite: Phaser.GameObjects.Sprite
+  healthBarBg: Phaser.GameObjects.Rectangle
+  healthBarFill: Phaser.GameObjects.Rectangle
 }
 
 export default class GameScene extends Phaser.Scene {
@@ -110,6 +119,8 @@ export default class GameScene extends Phaser.Scene {
   private localPlayerId?: string
   private activeRoomCode?: string
   private remotePlayers = new Map<string, RemotePlayerView>()
+  private serverZombies = new Map<string, ServerZombieView>()
+  private serverBullets = new Map<string, Phaser.GameObjects.Sprite>()
   private lastNetworkSendAt = 0
   private multiplayerStatusText?: Phaser.GameObjects.Text
   private multiplayerConnectionStatus: MultiplayerConnectionStatus = 'disconnected'
@@ -184,8 +195,10 @@ export default class GameScene extends Phaser.Scene {
     this.updatePlayerMovement()
     this.player.aimAt(this.input.activePointer)
     this.updateWeaponSwitching()
-    this.updateRepairInteraction()
-    this.updatePlayerZoneNavigation()
+    if (this.gameMode === 'singlePlayer') {
+      this.updateRepairInteraction()
+      this.updatePlayerZoneNavigation()
+    }
     this.sendMultiplayerState(time)
 
     if (!this.isIntermission && this.input.activePointer.isDown) {
@@ -194,19 +207,21 @@ export default class GameScene extends Phaser.Scene {
 
     this.clearNavigationPathDebug()
 
-    this.zombies.children.each((child) => {
-      const zombie = child as Zombie
-      this.updateZombieTarget(zombie, time)
-      this.updateZombieDebugLabel(zombie)
-      this.damagePlayerOnContact(zombie, time)
-      return true
-    })
+    if (this.gameMode === 'singlePlayer') {
+      this.zombies.children.each((child) => {
+        const zombie = child as Zombie
+        this.updateZombieTarget(zombie, time)
+        this.updateZombieDebugLabel(zombie)
+        this.damagePlayerOnContact(zombie, time)
+        return true
+      })
+    }
 
-    if (!this.isIntermission && this.zombiesToSpawn === 0 && this.zombies.countActive(true) === 0) {
+    if (this.gameMode === 'singlePlayer' && !this.isIntermission && this.zombiesToSpawn === 0 && this.zombies.countActive(true) === 0) {
       this.completeWave()
     }
 
-    if (this.isIntermission && Phaser.Input.Keyboard.JustDown(this.keys.ENTER)) {
+    if (this.gameMode === 'singlePlayer' && this.isIntermission && Phaser.Input.Keyboard.JustDown(this.keys.ENTER)) {
       this.startNextWave()
     }
   }
@@ -498,6 +513,12 @@ export default class GameScene extends Phaser.Scene {
     this.multiplayerStatusText = undefined
     this.isIntermission = true
     this.multiplayerText.setText(this.activeRoomCode ? `Room ${this.activeRoomCode}` : '')
+    if (mode === 'multiplayer') {
+      this.isIntermission = false
+      this.cashText.setText('Cash --')
+      return
+    }
+
     this.startNextWave()
   }
 
@@ -582,6 +603,7 @@ export default class GameScene extends Phaser.Scene {
     socket.on('roomNotFound', () => this.setMultiplayerStatus('Room not found.'))
     socket.on('playerStates', (players) => this.renderRemotePlayers(players))
     socket.on('playerShot', (payload) => this.handleRemoteShot(payload))
+    socket.on('gameState', (payload) => this.applyServerGameState(payload))
     socket.on('connect_error', () => {
       this.setMultiplayerConnectionStatus(
         'connectionError',
@@ -658,38 +680,8 @@ export default class GameScene extends Phaser.Scene {
       return
     }
 
-    this.spawnRemoteBulletVisuals(payload)
-  }
-
-  private spawnRemoteBulletVisuals(payload: PlayerShotPayload) {
-    const weapon = weapons[payload.weaponId] ?? weapons.pistol
-    const baseAngle = this.getAimAngle(payload.x, payload.y, payload.aimX, payload.aimY, payload.rotation)
-    const spreadRadians = Phaser.Math.DegToRad(weapon.spreadDegrees)
-    const firstShotOffset = weapon.bulletsPerShot > 1 ? -spreadRadians / 2 : 0
-    const angleStep = weapon.bulletsPerShot > 1 ? spreadRadians / (weapon.bulletsPerShot - 1) : 0
-
-    this.createMuzzleFlash(payload.x, payload.y, baseAngle, 0xffc857)
-
-    for (let i = 0; i < weapon.bulletsPerShot; i += 1) {
-      const shotAngle = baseAngle + firstShotOffset + angleStep * i
-      const directionX = Math.cos(shotAngle)
-      const directionY = Math.sin(shotAngle)
-      const spawnOffset = 28
-      const bullet = this.physics.add.sprite(
-        payload.x + directionX * spawnOffset,
-        payload.y + directionY * spawnOffset,
-        'bullet',
-      )
-      const body = bullet.body as Phaser.Physics.Arcade.Body
-
-      bullet.setDepth(2)
-      bullet.setRotation(shotAngle)
-      bullet.setTint(0xffc857)
-      body.setCircle(4)
-      body.setVelocity(directionX * weapon.bulletSpeed, directionY * weapon.bulletSpeed)
-
-      this.time.delayedCall(900, () => bullet.destroy())
-    }
+    const angle = this.getAimAngle(payload.x, payload.y, payload.aimX, payload.aimY, payload.rotation)
+    this.createMuzzleFlash(payload.x, payload.y, angle, 0xffc857)
   }
 
   private createMuzzleFlash(x: number, y: number, angle: number, color = 0xfff2a8) {
@@ -746,6 +738,113 @@ export default class GameScene extends Phaser.Scene {
     })
   }
 
+  private applyServerGameState(gameState: NetworkGameState) {
+    if (this.gameMode !== 'multiplayer') {
+      return
+    }
+
+    this.renderRemotePlayers(gameState.players)
+    this.renderServerZombies(gameState.zombies)
+    this.renderServerBullets(gameState.bullets)
+    this.updateMultiplayerHud(gameState)
+
+    if (gameState.gameOver && !this.isGameOver) {
+      this.endGame()
+    }
+  }
+
+  private renderServerZombies(zombies: NetworkZombieState[]) {
+    zombies.forEach((zombie) => {
+      const view = this.getServerZombieView(zombie.id)
+      const healthPercent = Phaser.Math.Clamp(zombie.health / zombie.maxHealth, 0, 1)
+
+      view.sprite.setPosition(zombie.x, zombie.y)
+      view.healthBarBg.setPosition(zombie.x, zombie.y - 28)
+      view.healthBarFill.setPosition(zombie.x - (32 - 32 * healthPercent) / 2, zombie.y - 28)
+      view.healthBarFill.width = 32 * healthPercent
+    })
+
+    const zombieIds = new Set(zombies.map((zombie) => zombie.id))
+    this.serverZombies.forEach((_view, zombieId) => {
+      if (!zombieIds.has(zombieId)) {
+        this.removeServerZombie(zombieId)
+      }
+    })
+  }
+
+  private getServerZombieView(zombieId: string) {
+    const existing = this.serverZombies.get(zombieId)
+
+    if (existing) {
+      return existing
+    }
+
+    const sprite = this.add.sprite(0, 0, 'zombie').setDepth(2)
+    const healthBarBg = this.add.rectangle(0, -28, 34, 5, 0x111111).setDepth(3)
+    const healthBarFill = this.add.rectangle(0, -28, 32, 3, 0x7bed65).setDepth(3)
+    const view = { sprite, healthBarBg, healthBarFill }
+
+    this.serverZombies.set(zombieId, view)
+    return view
+  }
+
+  private removeServerZombie(zombieId: string) {
+    const view = this.serverZombies.get(zombieId)
+
+    if (!view) {
+      return
+    }
+
+    view.sprite.destroy()
+    view.healthBarBg.destroy()
+    view.healthBarFill.destroy()
+    this.serverZombies.delete(zombieId)
+  }
+
+  private renderServerBullets(bullets: NetworkBulletState[]) {
+    bullets.forEach((bullet) => {
+      const view = this.getServerBulletView(bullet.id)
+
+      view.setPosition(bullet.x, bullet.y)
+      view.setRotation(Math.atan2(bullet.vy, bullet.vx))
+    })
+
+    const bulletIds = new Set(bullets.map((bullet) => bullet.id))
+    this.serverBullets.forEach((view, bulletId) => {
+      if (!bulletIds.has(bulletId)) {
+        view.destroy()
+        this.serverBullets.delete(bulletId)
+      }
+    })
+  }
+
+  private getServerBulletView(bulletId: string) {
+    const existing = this.serverBullets.get(bulletId)
+
+    if (existing) {
+      return existing
+    }
+
+    const sprite = this.add.sprite(0, 0, 'bullet').setDepth(2)
+    this.serverBullets.set(bulletId, sprite)
+    return sprite
+  }
+
+  private updateMultiplayerHud(gameState: NetworkGameState) {
+    this.waveText.setText(`Wave ${gameState.wave}`)
+    this.scoreText.setText(`Score ${gameState.score}`)
+    this.cashText.setText('Cash --')
+
+    const localPlayer = gameState.players.find((player) => player.id === this.localPlayerId)
+
+    if (!localPlayer) {
+      return
+    }
+
+    this.player.health = localPlayer.health
+    this.updateHealthBar()
+  }
+
   private getRemotePlayerView(playerId: string) {
     const existing = this.remotePlayers.get(playerId)
 
@@ -794,6 +893,14 @@ export default class GameScene extends Phaser.Scene {
       view.label.destroy()
     })
     this.remotePlayers.clear()
+    this.serverZombies.forEach((view) => {
+      view.sprite.destroy()
+      view.healthBarBg.destroy()
+      view.healthBarFill.destroy()
+    })
+    this.serverZombies.clear()
+    this.serverBullets.forEach((view) => view.destroy())
+    this.serverBullets.clear()
   }
 
   private hudTextStyle(): Phaser.Types.GameObjects.Text.TextStyle {
@@ -962,6 +1069,11 @@ export default class GameScene extends Phaser.Scene {
     const angleStep = weapon.bulletsPerShot > 1 ? spreadRadians / (weapon.bulletsPerShot - 1) : 0
 
     this.createMuzzleFlash(this.player.x, this.player.y, baseAngle)
+
+    if (this.gameMode === 'multiplayer') {
+      this.emitLocalShot(mouseWorldPoint.x, mouseWorldPoint.y)
+      return
+    }
 
     for (let i = 0; i < weapon.bulletsPerShot; i += 1) {
       const randomSpread = weapon.bulletsPerShot === 1 ? Phaser.Math.FloatBetween(-spreadRadians / 2, spreadRadians / 2) : 0

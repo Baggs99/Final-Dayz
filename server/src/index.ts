@@ -2,50 +2,23 @@ import cors from 'cors'
 import express from 'express'
 import { createServer } from 'node:http'
 import { Server, type Socket } from 'socket.io'
-
-type PlayerState = {
-  id: string
-  x: number
-  y: number
-  rotation: number
-  aimX: number
-  aimY: number
-  weaponId: WeaponId
-  weapon: string
-  connected: boolean
-}
-
-type WeaponId = 'pistol' | 'smg' | 'shotgun'
-
-type PlayerShotPayload = {
-  roomCode?: string
-  playerId?: string
-  x?: number
-  y?: number
-  aimX?: number
-  aimY?: number
-  rotation?: number
-  weaponId?: WeaponId
-  weapon?: string
-  timestamp?: number
-}
-
-type Room = {
-  code: string
-  players: Map<string, PlayerState>
-}
+import {
+  createServerPlayer,
+  createServerRoom,
+  createShotBullets,
+  getGameStateSnapshot,
+  tickRoom,
+  updatePlayerFromClient,
+} from './game/simulation.js'
+import type { PlayerShotPayload, ServerPlayer, ServerRoom } from './game/types.js'
+import { isWeaponId, serverWeapons } from './game/weapons.js'
 
 const PORT = Number(process.env.PORT) || 3001
 const DEFAULT_CLIENT_ORIGINS = ['http://localhost:5173', 'https://zombie.baglini.co']
 const allowedOrigins = parseAllowedOrigins(process.env.CLIENT_ORIGIN)
-const rooms = new Map<string, Room>()
+const rooms = new Map<string, ServerRoom>()
 const socketRooms = new Map<string, string>()
 const lastShotAtBySocket = new Map<string, number>()
-const weaponFireRates: Record<WeaponId, { name: string; fireRateMs: number }> = {
-  pistol: { name: 'Pistol', fireRateMs: 220 },
-  smg: { name: 'SMG', fireRateMs: 75 },
-  shotgun: { name: 'Shotgun', fireRateMs: 650 },
-}
 
 const app = express()
 app.use(cors({ origin: validateCorsOrigin }))
@@ -64,11 +37,8 @@ const io = new Server(httpServer, {
 io.on('connection', (socket) => {
   socket.on('createRoom', () => {
     const roomCode = createRoomCode()
-    const player = createPlayerState(socket.id)
-    const room: Room = {
-      code: roomCode,
-      players: new Map([[socket.id, player]]),
-    }
+    const player = createServerPlayer(socket.id)
+    const room = createServerRoom(roomCode, player)
 
     rooms.set(roomCode, room)
     socketRooms.set(socket.id, roomCode)
@@ -99,7 +69,7 @@ io.on('connection', (socket) => {
       return
     }
 
-    const player = createPlayerState(socket.id)
+    const player = createServerPlayer(socket.id)
     room.players.set(socket.id, player)
     socketRooms.set(socket.id, roomCode)
     socket.join(roomCode)
@@ -114,11 +84,11 @@ io.on('connection', (socket) => {
     io.to(roomCode).emit('playerStates', getPlayers(room))
   })
 
-  socket.on('playerStateUpdate', (state: Partial<PlayerState>) => {
+  socket.on('playerStateUpdate', (state: Partial<ServerPlayer>) => {
     updatePlayerState(socket, state)
   })
 
-  socket.on('playerInput', (state: Partial<PlayerState>) => {
+  socket.on('playerInput', (state: Partial<ServerPlayer>) => {
     updatePlayerState(socket, state)
   })
 
@@ -135,25 +105,20 @@ io.on('connection', (socket) => {
   })
 })
 
+setInterval(() => {
+  const now = Date.now()
+
+  rooms.forEach((room) => {
+    tickRoom(room, now)
+    io.to(room.code).emit('gameState', getGameStateSnapshot(room))
+  })
+}, 50)
+
 httpServer.listen(PORT, () => {
   console.log(`Final Dayz multiplayer server listening on ${PORT}`)
   console.log(`Allowed client origins: ${allowedOrigins.join(', ')}`)
   console.log(`Health check: http://localhost:${PORT}/health`)
 })
-
-function createPlayerState(id: string): PlayerState {
-  return {
-    id,
-    x: 0,
-    y: 0,
-    rotation: 0,
-    aimX: 0,
-    aimY: 0,
-    weapon: 'Pistol',
-    weaponId: 'pistol',
-    connected: true,
-  }
-}
 
 function createRoomCode() {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
@@ -178,7 +143,7 @@ function getSocketRoom(socket: Socket) {
   return roomCode ? rooms.get(roomCode) : undefined
 }
 
-function getPlayers(room: Room) {
+function getPlayers(room: ServerRoom) {
   return Array.from(room.players.values())
 }
 
@@ -211,7 +176,7 @@ function leaveRoom(socket: Socket) {
   io.to(roomCode).emit('playerStates', getPlayers(room))
 }
 
-function updatePlayerState(socket: Socket, state: Partial<PlayerState>) {
+function updatePlayerState(socket: Socket, state: Partial<ServerPlayer>) {
   const room = getSocketRoom(socket)
 
   if (!room) {
@@ -224,14 +189,7 @@ function updatePlayerState(socket: Socket, state: Partial<PlayerState>) {
     return
   }
 
-  player.x = toNumber(state.x, player.x)
-  player.y = toNumber(state.y, player.y)
-  player.rotation = toNumber(state.rotation, player.rotation)
-  player.aimX = toNumber(state.aimX, player.aimX)
-  player.aimY = toNumber(state.aimY, player.aimY)
-  player.weaponId = isWeaponId(state.weaponId) ? state.weaponId : player.weaponId
-  player.weapon = typeof state.weapon === 'string' ? state.weapon : player.weapon
-  player.connected = true
+  updatePlayerFromClient(player, state)
 
   io.to(room.code).emit('playerStates', getPlayers(room))
 }
@@ -250,7 +208,7 @@ function handlePlayerShoot(socket: Socket, payload: PlayerShotPayload) {
   }
 
   const weaponId = isWeaponId(payload.weaponId) ? payload.weaponId : player.weaponId
-  const weapon = weaponFireRates[weaponId]
+  const weapon = serverWeapons[weaponId]
   const now = Date.now()
   const lastShotAt = lastShotAtBySocket.get(socket.id) ?? 0
   const minInterval = Math.max(50, weapon.fireRateMs - 20)
@@ -260,6 +218,11 @@ function handlePlayerShoot(socket: Socket, payload: PlayerShotPayload) {
   }
 
   lastShotAtBySocket.set(socket.id, now)
+  const createdBullets = createShotBullets(room, socket.id, payload, now)
+
+  if (!createdBullets) {
+    return
+  }
 
   const shotPayload = {
     roomCode: room.code,
@@ -279,10 +242,6 @@ function handlePlayerShoot(socket: Socket, payload: PlayerShotPayload) {
 
 function toNumber(value: unknown, fallback: number) {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback
-}
-
-function isWeaponId(value: unknown): value is WeaponId {
-  return value === 'pistol' || value === 'smg' || value === 'shotgun'
 }
 
 function parseAllowedOrigins(value: string | undefined) {
