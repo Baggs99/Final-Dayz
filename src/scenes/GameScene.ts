@@ -57,6 +57,16 @@ type GridCell = {
   y: number
 }
 
+type TouchJoystick = {
+  base: Phaser.GameObjects.Arc
+  knob: Phaser.GameObjects.Arc
+  pointerId?: number
+  centerX: number
+  centerY: number
+  radius: number
+  vector: Phaser.Math.Vector2
+}
+
 type GameMode = 'singlePlayer' | 'multiplayer'
 
 type RemotePlayerView = {
@@ -148,6 +158,8 @@ export default class GameScene extends Phaser.Scene {
   private debugNavRender = false
   private multiplayerNavDebugObjects: Phaser.GameObjects.GameObject[] = []
   private multiplayerNavDebugText?: Phaser.GameObjects.Text
+  private touchJoystick?: TouchJoystick
+  private lastAimWorldPoint = new Phaser.Math.Vector2(0, 0)
 
   constructor() {
     super('GameScene')
@@ -170,6 +182,7 @@ export default class GameScene extends Phaser.Scene {
     this.walls = this.physics.add.staticGroup()
 
     this.player = new Player(this, this.scale.width / 2, this.scale.height / 2)
+    this.lastAimWorldPoint.set(this.player.x + 1, this.player.y)
     this.keys = this.input.keyboard!.addKeys('W,A,S,D,ONE,TWO,THREE,E,ENTER') as WasdKeys
 
     this.createBaseLayout()
@@ -185,11 +198,16 @@ export default class GameScene extends Phaser.Scene {
     )
 
     this.createHud()
+    this.createTouchControls()
     this.showStartScreen()
 
     this.scale.on('resize', this.handleResize, this)
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       this.scale.off('resize', this.handleResize, this)
+      this.input.off('pointerdown', this.handleTouchPointerDown, this)
+      this.input.off('pointermove', this.handleTouchPointerMove, this)
+      this.input.off('pointerup', this.handleTouchPointerUp, this)
+      this.input.off('pointerupoutside', this.handleTouchPointerUp, this)
       this.disconnectMultiplayer()
     })
   }
@@ -211,7 +229,7 @@ export default class GameScene extends Phaser.Scene {
     this.timerText.setText(`${mins}:${secs}.${centis}`)
 
     this.updatePlayerMovement()
-    this.player.aimAt(this.input.activePointer)
+    this.updatePlayerAim()
     this.updateWeaponSwitching()
     if (this.gameMode === 'singlePlayer') {
       this.updateRepairInteraction()
@@ -219,7 +237,7 @@ export default class GameScene extends Phaser.Scene {
     }
     this.sendMultiplayerState(time)
 
-    if (!this.isIntermission && this.input.activePointer.isDown) {
+    if (!this.isIntermission && this.input.activePointer.isDown && !this.isTouchJoystickPointer(this.input.activePointer)) {
       this.tryShoot(time)
     }
 
@@ -473,6 +491,99 @@ export default class GameScene extends Phaser.Scene {
       pointer.event.stopPropagation()
       this.skipRound()
     })
+  }
+
+  private createTouchControls() {
+    const isTouchDevice = this.sys.game.device.input.touch || window.matchMedia('(pointer: coarse)').matches
+
+    if (!isTouchDevice) {
+      return
+    }
+
+    const radius = 54
+    const centerX = 86
+    const centerY = this.scale.height - 92
+    const base = this.add
+      .circle(centerX, centerY, radius, 0x111111, 0.34)
+      .setStrokeStyle(3, 0xffffff, 0.42)
+      .setScrollFactor(0)
+      .setDepth(50)
+    const knob = this.add
+      .circle(centerX, centerY, 22, 0xffffff, 0.46)
+      .setScrollFactor(0)
+      .setDepth(51)
+
+    this.touchJoystick = {
+      base,
+      knob,
+      centerX,
+      centerY,
+      radius,
+      vector: new Phaser.Math.Vector2(0, 0),
+    }
+
+    this.input.addPointer(2)
+    this.input.on('pointerdown', this.handleTouchPointerDown, this)
+    this.input.on('pointermove', this.handleTouchPointerMove, this)
+    this.input.on('pointerup', this.handleTouchPointerUp, this)
+    this.input.on('pointerupoutside', this.handleTouchPointerUp, this)
+  }
+
+  private handleTouchPointerDown(pointer: Phaser.Input.Pointer) {
+    if (!this.touchJoystick || this.touchJoystick.pointerId !== undefined || pointer.x > this.scale.width * 0.45) {
+      return
+    }
+
+    this.touchJoystick.pointerId = pointer.id
+    this.updateTouchJoystick(pointer)
+  }
+
+  private handleTouchPointerMove(pointer: Phaser.Input.Pointer) {
+    if (!this.touchJoystick || this.touchJoystick.pointerId !== pointer.id) {
+      return
+    }
+
+    this.updateTouchJoystick(pointer)
+  }
+
+  private handleTouchPointerUp(pointer: Phaser.Input.Pointer) {
+    if (!this.touchJoystick || this.touchJoystick.pointerId !== pointer.id) {
+      return
+    }
+
+    this.touchJoystick.pointerId = undefined
+    this.touchJoystick.vector.set(0, 0)
+    this.touchJoystick.knob.setPosition(this.touchJoystick.centerX, this.touchJoystick.centerY)
+  }
+
+  private updateTouchJoystick(pointer: Phaser.Input.Pointer) {
+    if (!this.touchJoystick) {
+      return
+    }
+
+    const offset = new Phaser.Math.Vector2(pointer.x - this.touchJoystick.centerX, pointer.y - this.touchJoystick.centerY)
+    const distance = offset.length()
+    const clampedDistance = Math.min(distance, this.touchJoystick.radius)
+    const direction = distance > 0 ? offset.clone().normalize() : new Phaser.Math.Vector2(0, 0)
+
+    this.touchJoystick.vector.copy(direction).scale(clampedDistance / this.touchJoystick.radius)
+    this.touchJoystick.knob.setPosition(
+      this.touchJoystick.centerX + direction.x * clampedDistance,
+      this.touchJoystick.centerY + direction.y * clampedDistance,
+    )
+  }
+
+  private updateTouchJoystickPosition(gameSize: Phaser.Structs.Size) {
+    if (!this.touchJoystick) {
+      return
+    }
+
+    this.touchJoystick.centerX = 86
+    this.touchJoystick.centerY = gameSize.height - 92
+    this.touchJoystick.vector.set(0, 0)
+    this.touchJoystick.pointerId = undefined
+    this.touchJoystick.base.setPosition(this.touchJoystick.centerX, this.touchJoystick.centerY)
+    this.touchJoystick.knob.setPosition(this.touchJoystick.centerX, this.touchJoystick.centerY)
   }
 
   private showStartScreen() {
@@ -864,8 +975,8 @@ export default class GameScene extends Phaser.Scene {
       x: this.player.x,
       y: this.player.y,
       rotation: this.player.rotation,
-      aimX: this.input.activePointer.worldX,
-      aimY: this.input.activePointer.worldY,
+      aimX: this.lastAimWorldPoint.x,
+      aimY: this.lastAimWorldPoint.y,
       weaponId: this.currentWeaponId,
       weapon: this.currentWeapon.name,
     })
@@ -1399,8 +1510,33 @@ export default class GameScene extends Phaser.Scene {
       direction.y += 1
     }
 
+    if (this.touchJoystick && this.touchJoystick.vector.lengthSq() > 0.01) {
+      direction.x += this.touchJoystick.vector.x
+      direction.y += this.touchJoystick.vector.y
+    }
+
     direction.normalize().scale(this.player.speed)
     body.setVelocity(direction.x, direction.y)
+  }
+
+  private isTouchJoystickPointer(pointer: Phaser.Input.Pointer) {
+    return this.touchJoystick?.pointerId === pointer.id
+  }
+
+  private updatePlayerAim() {
+    const pointer = this.input.activePointer
+
+    if (!this.isTouchJoystickPointer(pointer)) {
+      const aimPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y)
+      this.lastAimWorldPoint.set(aimPoint.x, aimPoint.y)
+    }
+
+    this.player.rotation = Phaser.Math.Angle.Between(
+      this.player.x,
+      this.player.y,
+      this.lastAimWorldPoint.x,
+      this.lastAimWorldPoint.y,
+    )
   }
 
   private updateWeaponSwitching() {
@@ -1467,9 +1603,7 @@ export default class GameScene extends Phaser.Scene {
 
     this.lastShotAt = time
 
-    const pointer = this.input.activePointer
-    const mouseWorldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y)
-    const direction = new Phaser.Math.Vector2(mouseWorldPoint.x - this.player.x, mouseWorldPoint.y - this.player.y)
+    const direction = new Phaser.Math.Vector2(this.lastAimWorldPoint.x - this.player.x, this.lastAimWorldPoint.y - this.player.y)
 
     if (direction.lengthSq() === 0) {
       return
@@ -1486,7 +1620,7 @@ export default class GameScene extends Phaser.Scene {
     this.createMuzzleFlash(this.player.x, this.player.y, baseAngle)
 
     if (this.gameMode === 'multiplayer') {
-      this.emitLocalShot(mouseWorldPoint.x, mouseWorldPoint.y)
+      this.emitLocalShot(this.lastAimWorldPoint.x, this.lastAimWorldPoint.y)
       return
     }
 
@@ -1502,7 +1636,7 @@ export default class GameScene extends Phaser.Scene {
       bullet.launch(shotDirection.x, shotDirection.y)
     }
 
-    this.emitLocalShot(mouseWorldPoint.x, mouseWorldPoint.y)
+    this.emitLocalShot(this.lastAimWorldPoint.x, this.lastAimWorldPoint.y)
   }
 
   private togglePause() {
@@ -2478,6 +2612,7 @@ export default class GameScene extends Phaser.Scene {
     this.pauseButton?.setPosition(gameSize.width - 20, 20)
     this.timerText?.setPosition(gameSize.width - 20, 58)
     this.skipRoundButton?.setPosition(gameSize.width - 20, 94)
+    this.updateTouchJoystickPosition(gameSize)
     this.messageText?.setPosition(gameSize.width / 2, 34)
     this.repairHintText?.setPosition(gameSize.width / 2, gameSize.height - 72)
     this.pauseOverlay?.setPosition(gameSize.width / 2, gameSize.height / 2)
