@@ -1,3 +1,4 @@
+import type { EnemyType } from './enemies.js'
 import type { WeaponId } from './weapons.js'
 
 export type RoomPhase = 'waitingForPlayers' | 'readyToStart' | 'fighting' | 'waveComplete' | 'shopping' | 'gameOver'
@@ -19,11 +20,24 @@ export type ServerPlayer = {
 
 export type ServerZombie = {
   id: string
+  enemyType: EnemyType
+  color: number
   x: number
   y: number
   health: number
   maxHealth: number
+  baseSpeed: number
   speed: number
+  damage: number
+  scoreValue: number
+  barricadeDamageMultiplier: number
+  explosionDamage: number
+  explosionRadius: number
+  spitDamage: number
+  spitRange: number
+  spitCooldownMs: number
+  screamRadius: number
+  screamSpeedMultiplier: number
   radius: number
   navState: 'chasingDirect' | 'movingToBarricade' | 'attackingBarricade' | 'routingToDoorway' | 'stuck'
   targetPlayerId?: string
@@ -34,6 +48,7 @@ export type ServerZombie = {
   routeIndex: number
   stuckCount: number
   lastAttackAt: number
+  lastSpitAt: number
   lastStuckCheckAt: number
   lastStuckX: number
   lastStuckY: number

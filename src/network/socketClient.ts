@@ -1,4 +1,5 @@
 import { io, type Socket } from 'socket.io-client'
+import type { EnemyType } from '../config/enemies'
 import type { WeaponId } from '../config/weapons'
 
 export type NetworkPlayerState = {
@@ -18,6 +19,8 @@ export type NetworkPlayerState = {
 
 export type NetworkZombieState = {
   id: string
+  enemyType: EnemyType
+  color: number
   x: number
   y: number
   health: number

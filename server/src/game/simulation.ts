@@ -10,14 +10,13 @@ import type {
   ServerRoom,
   ServerZombie,
 } from './types.js'
+import { getBossEnemyTypeForWave, pickEnemyTypeForWave, serverEnemyConfigs, type EnemyType } from './enemies.js'
 import { isWeaponId, serverWeapons } from './weapons.js'
 
 const WORLD_WIDTH = 1000
 const WORLD_HEIGHT = 700
 const PLAYER_RADIUS = 18
-const CONTACT_DAMAGE = 8
 const CONTACT_COOLDOWN_MS = 650
-const SCORE_PER_KILL = 10
 const DEBUG_MULTIPLAYER_SIM = false
 const ZOMBIE_WAYPOINT_TOLERANCE = 34
 const STUCK_CHECK_INTERVAL_MS = 500
@@ -279,7 +278,8 @@ function startNextWave(room: ServerRoom, now: number) {
   }
 
   for (let index = 0; index < count; index += 1) {
-    const zombie = createZombie(room, health, speed)
+    const bossEnemyType = index === 0 ? getBossEnemyTypeForWave(room.wave) : undefined
+    const zombie = createZombie(room, room.wave, health, speed, bossEnemyType)
     room.zombies.set(zombie.id, zombie)
 
     if (DEBUG_MULTIPLAYER_SIM) {
@@ -302,8 +302,10 @@ function completeWave(room: ServerRoom, now: number) {
   }
 }
 
-function createZombie(room: ServerRoom, health: number, speed: number): ServerZombie {
+function createZombie(room: ServerRoom, wave: number, health: number, speed: number, forcedEnemyType?: EnemyType): ServerZombie {
   const edge = Math.floor(Math.random() * 4)
+  const enemyType = forcedEnemyType ?? pickEnemyTypeForWave(wave)
+  const config = serverEnemyConfigs[enemyType]
   const margin = 40
   let x = 0
   let y = 0
@@ -324,17 +326,31 @@ function createZombie(room: ServerRoom, health: number, speed: number): ServerZo
 
   return {
     id: `z${zombieId += 1}`,
+    enemyType,
+    color: config.color,
     x,
     y,
-    health,
-    maxHealth: health,
-    speed,
-    radius: 17,
+    health: Math.round(health * config.healthMultiplier),
+    maxHealth: Math.round(health * config.healthMultiplier),
+    baseSpeed: Math.round(speed * config.speedMultiplier),
+    speed: Math.round(speed * config.speedMultiplier),
+    damage: Math.round(8 * config.damageMultiplier),
+    scoreValue: config.scoreValue,
+    barricadeDamageMultiplier: config.barricadeDamageMultiplier ?? 1,
+    explosionDamage: config.explosionDamage ?? 0,
+    explosionRadius: config.explosionRadius ?? 0,
+    spitDamage: config.spitDamage ?? 0,
+    spitRange: config.spitRange ?? 0,
+    spitCooldownMs: config.spitCooldownMs ?? 0,
+    screamRadius: config.screamRadius ?? 0,
+    screamSpeedMultiplier: config.screamSpeedMultiplier ?? 1,
+    radius: config.radius,
     navState: 'chasingDirect',
     routeNodeIds: [],
     routeIndex: 0,
     stuckCount: 0,
     lastAttackAt: 0,
+    lastSpitAt: 0,
     lastStuckCheckAt: 0,
     lastStuckX: x,
     lastStuckY: y,
@@ -366,6 +382,8 @@ function moveZombies(room: ServerRoom, now: number, deltaSeconds: number) {
     return
   }
 
+  applyScreamerAuras(room)
+
   room.zombies.forEach((zombie) => {
     const target = getNearestPlayer(zombie, alivePlayers)
 
@@ -374,6 +392,12 @@ function moveZombies(room: ServerRoom, now: number, deltaSeconds: number) {
     }
 
     zombie.targetPlayerId = target.id
+
+    if (trySpitterAttack(zombie, target, now)) {
+      updateZombieStuckState(room, zombie, target, now)
+      return
+    }
+
     const targetPoint = getZombieMoveTarget(room, zombie, target, now)
 
     if (!targetPoint) {
@@ -387,9 +411,59 @@ function moveZombies(room: ServerRoom, now: number, deltaSeconds: number) {
     const contactRadius = zombie.radius + PLAYER_RADIUS
 
     if (distanceSquared(zombie.x, zombie.y, target.x, target.y) <= contactRadius * contactRadius) {
-      damagePlayer(target, now)
+      if (zombie.enemyType === 'exploder') {
+        triggerExploderBurst(room, zombie, now)
+        room.zombies.delete(zombie.id)
+        return
+      }
+
+      damagePlayer(target, zombie.damage, now)
     }
   })
+}
+
+function applyScreamerAuras(room: ServerRoom) {
+  const zombies = Array.from(room.zombies.values())
+  const screamers = zombies.filter((zombie) => zombie.screamRadius > 0)
+
+  zombies.forEach((zombie) => {
+    const speedMultiplier = screamers.reduce((multiplier, screamer) => {
+      if (screamer === zombie) {
+        return multiplier
+      }
+
+      if (distanceSquared(zombie.x, zombie.y, screamer.x, screamer.y) > screamer.screamRadius * screamer.screamRadius) {
+        return multiplier
+      }
+
+      return Math.max(multiplier, screamer.screamSpeedMultiplier)
+    }, 1)
+
+    zombie.speed = zombie.baseSpeed * speedMultiplier
+  })
+}
+
+function trySpitterAttack(zombie: ServerZombie, target: ServerPlayer, now: number) {
+  if (zombie.enemyType !== 'spitter' || zombie.spitRange <= 0) {
+    return false
+  }
+
+  const sameZone = isInsideBase(zombie.x, zombie.y) === isInsideBase(target.x, target.y)
+
+  if (!sameZone || distanceSquared(zombie.x, zombie.y, target.x, target.y) > zombie.spitRange * zombie.spitRange) {
+    return false
+  }
+
+  zombie.navState = 'chasingDirect'
+  zombie.currentTargetPoint = { x: target.x, y: target.y }
+
+  if (now - zombie.lastSpitAt < zombie.spitCooldownMs) {
+    return true
+  }
+
+  zombie.lastSpitAt = now
+  damagePlayer(target, zombie.spitDamage, now, true)
+  return true
 }
 
 function getZombieMoveTarget(room: ServerRoom, zombie: ServerZombie, target: ServerPlayer, now: number): Point | undefined {
@@ -731,7 +805,7 @@ function attackBarricade(room: ServerRoom, zombie: ServerZombie, entryId: EntryG
 
   zombie.navState = 'attackingBarricade'
   zombie.lastAttackAt = now
-  barricade.health = Math.max(0, barricade.health - BARRICADE_ATTACK_DAMAGE)
+  barricade.health = Math.max(0, barricade.health - Math.round(BARRICADE_ATTACK_DAMAGE * zombie.barricadeDamageMultiplier))
 
   if (DEBUG_MULTIPLAYER_SIM) {
     console.log(`zombie damaged ${entryId} barricade: ${barricade.health}/${barricade.maxHealth}`)
@@ -1024,13 +1098,67 @@ function getNearestPlayer(zombie: ServerZombie, players: ServerPlayer[]) {
     .sort((a, b) => distanceSquared(zombie.x, zombie.y, a.x, a.y) - distanceSquared(zombie.x, zombie.y, b.x, b.y))[0]
 }
 
-function damagePlayer(player: ServerPlayer, now: number) {
-  if (now - player.lastDamagedAt < CONTACT_COOLDOWN_MS) {
+function triggerExploderBurst(room: ServerRoom, source: ServerZombie, now: number, damageOtherZombies = true) {
+  if (source.enemyType !== 'exploder' || source.explosionRadius <= 0) {
+    return
+  }
+
+  room.players.forEach((player) => {
+    if (!player.alive) {
+      return
+    }
+
+    if (distanceSquared(source.x, source.y, player.x, player.y) <= source.explosionRadius * source.explosionRadius) {
+      damagePlayer(player, source.explosionDamage, now, true)
+    }
+  })
+
+  room.barricades.forEach((barricade, entryId) => {
+    const entry = entryGeometries.find((geometry) => geometry.id === entryId)
+
+    if (!entry || barricade.health <= 0) {
+      return
+    }
+
+    const center = {
+      x: entry.barricadeRect.x + entry.barricadeRect.width / 2,
+      y: entry.barricadeRect.y + entry.barricadeRect.height / 2,
+    }
+
+    if (distanceSquared(source.x, source.y, center.x, center.y) <= source.explosionRadius * source.explosionRadius) {
+      barricade.health = Math.max(0, barricade.health - Math.round(source.explosionDamage * 0.8))
+    }
+  })
+
+  if (!damageOtherZombies) {
+    return
+  }
+
+  room.zombies.forEach((zombie) => {
+    if (zombie.id === source.id) {
+      return
+    }
+
+    if (distanceSquared(source.x, source.y, zombie.x, zombie.y) > source.explosionRadius * source.explosionRadius) {
+      return
+    }
+
+    zombie.health -= Math.round(source.explosionDamage * 0.9)
+
+    if (zombie.health <= 0) {
+      room.zombies.delete(zombie.id)
+      room.score += zombie.scoreValue
+    }
+  })
+}
+
+function damagePlayer(player: ServerPlayer, damage: number, now: number, ignoreCooldown = false) {
+  if (!ignoreCooldown && now - player.lastDamagedAt < CONTACT_COOLDOWN_MS) {
     return
   }
 
   player.lastDamagedAt = now
-  player.health = Math.max(0, player.health - CONTACT_DAMAGE)
+  player.health = Math.max(0, player.health - damage)
   player.alive = player.health > 0
 }
 
@@ -1047,8 +1175,9 @@ function handleBulletZombieCollisions(room: ServerRoom) {
       room.bullets.delete(bullet.id)
 
       if (zombie.health <= 0) {
+        triggerExploderBurst(room, zombie, Date.now(), false)
         room.zombies.delete(zombie.id)
-        room.score += SCORE_PER_KILL
+        room.score += zombie.scoreValue
       }
 
       break

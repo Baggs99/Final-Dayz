@@ -1,5 +1,6 @@
 import Phaser from 'phaser'
 import { barricadeConfig } from '../config/barricades'
+import { getBossEnemyTypeForWave, pickEnemyTypeForWave, type EnemyType } from '../config/enemies'
 import { shopConfig, shopUpgradeConfig, shopWeaponUnlocks, type ShopItemId } from '../config/shop'
 import { waveConfig } from '../config/waves'
 import { defaultWeaponId, type WeaponConfig, type WeaponId, weapons } from '../config/weapons'
@@ -68,6 +69,7 @@ type ServerZombieView = {
   sprite: Phaser.GameObjects.Sprite
   healthBarBg: Phaser.GameObjects.Rectangle
   healthBarFill: Phaser.GameObjects.Rectangle
+  enemyType?: string
 }
 
 export default class GameScene extends Phaser.Scene {
@@ -94,6 +96,7 @@ export default class GameScene extends Phaser.Scene {
   private messageText!: Phaser.GameObjects.Text
   private repairHintText!: Phaser.GameObjects.Text
   private pauseButton!: Phaser.GameObjects.Text
+  private skipRoundButton!: Phaser.GameObjects.Text
   private timerText!: Phaser.GameObjects.Text
   private pauseOverlay?: Phaser.GameObjects.Text
   private startOverlay?: Phaser.GameObjects.Container
@@ -120,6 +123,7 @@ export default class GameScene extends Phaser.Scene {
   private lastTimerUpdate = 0
   private messageTimer?: Phaser.Time.TimerEvent
   private waveSpawnTimer?: Phaser.Time.TimerEvent
+  private pendingBossEnemyType?: EnemyType
   private isIntermission = false
   private isStarted = false
   private isPaused = false
@@ -222,6 +226,7 @@ export default class GameScene extends Phaser.Scene {
     this.clearNavigationPathDebug()
 
     if (this.gameMode === 'singlePlayer') {
+      this.updateScreamerAuras()
       this.zombies.children.each((child) => {
         const zombie = child as Zombie
         this.updateZombieTarget(zombie, time)
@@ -380,6 +385,10 @@ export default class GameScene extends Phaser.Scene {
     this.physics.add.collider(this.player, this.walls)
     this.physics.add.collider(this.zombies, this.walls)
     this.physics.add.collider(this.zombies, this.zombies)
+    this.addBarricadeColliders()
+  }
+
+  private addBarricadeColliders() {
     this.barricades.forEach((barricade) => {
       this.physics.add.collider(this.player, barricade)
       this.physics.add.collider(this.zombies, barricade)
@@ -447,6 +456,23 @@ export default class GameScene extends Phaser.Scene {
       .setOrigin(1, 0)
       .setScrollFactor(0)
 
+    this.skipRoundButton = this.add
+      .text(this.scale.width - 20, 94, 'Skip Round', {
+        backgroundColor: '#20262b',
+        color: '#fff2a8',
+        fontFamily: 'Arial',
+        fontSize: '16px',
+        padding: { x: 10, y: 6 },
+      })
+      .setOrigin(1, 0)
+      .setScrollFactor(0)
+      .setInteractive({ useHandCursor: true })
+      .setVisible(false)
+
+    this.skipRoundButton.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+      pointer.event.stopPropagation()
+      this.skipRound()
+    })
   }
 
   private showStartScreen() {
@@ -522,6 +548,7 @@ export default class GameScene extends Phaser.Scene {
   private startGame(mode: GameMode) {
     this.gameMode = mode
     this.isStarted = true
+    this.skipRoundButton.setVisible(mode === 'singlePlayer')
     this.startOverlay?.destroy()
     this.startOverlay = undefined
     this.multiplayerStatusText = undefined
@@ -975,6 +1002,9 @@ export default class GameScene extends Phaser.Scene {
       const healthPercent = Phaser.Math.Clamp(zombie.health / zombie.maxHealth, 0, 1)
 
       view.sprite.setPosition(zombie.x, zombie.y)
+      view.sprite.setTint(zombie.color)
+      view.sprite.setDisplaySize(zombie.radius * 2, zombie.radius * 2)
+      view.enemyType = zombie.enemyType
       view.healthBarBg.setPosition(zombie.x, zombie.y - 28)
       view.healthBarFill.setPosition(zombie.x - (32 - 32 * healthPercent) / 2, zombie.y - 28)
       view.healthBarFill.width = 32 * healthPercent
@@ -998,7 +1028,7 @@ export default class GameScene extends Phaser.Scene {
     const sprite = this.add.sprite(0, 0, 'zombie').setDepth(2)
     const healthBarBg = this.add.rectangle(0, -28, 34, 5, 0x111111).setDepth(3)
     const healthBarFill = this.add.rectangle(0, -28, 32, 3, 0x7bed65).setDepth(3)
-    const view = { sprite, healthBarBg, healthBarFill }
+    const view: ServerZombieView = { sprite, healthBarBg, healthBarFill }
 
     this.serverZombies.set(zombieId, view)
     return view
@@ -1516,11 +1546,13 @@ export default class GameScene extends Phaser.Scene {
     this.waveSpawnTimer?.remove(false)
     this.wave += 1
     this.zombiesToSpawn = waveConfig.baseZombieCount + this.wave * waveConfig.zombiesPerWave
+    this.pendingBossEnemyType = getBossEnemyTypeForWave(this.wave)
     this.spawnDelay = Math.max(
       waveConfig.minSpawnDelayMs,
       waveConfig.baseSpawnDelayMs - this.wave * waveConfig.spawnDelayReductionPerWaveMs,
     )
     this.waveText.setText(`Wave ${this.wave}`)
+    this.skipRoundButton.setText('Skip Round')
 
     this.waveSpawnTimer = this.time.addEvent({
       delay: this.spawnDelay,
@@ -1536,7 +1568,30 @@ export default class GameScene extends Phaser.Scene {
 
     this.updateCash(bonus)
     this.showMessage(`Wave bonus +$${bonus}`)
+    this.skipRoundButton.setText('Next Wave')
     this.showShop()
+  }
+
+  private skipRound() {
+    if (!this.isStarted || this.isGameOver || this.gameMode !== 'singlePlayer') {
+      return
+    }
+
+    if (this.isIntermission) {
+      this.startNextWave()
+      return
+    }
+
+    this.waveSpawnTimer?.remove(false)
+    this.waveSpawnTimer = undefined
+    this.zombiesToSpawn = 0
+    this.bullets.clear(true, true)
+    this.zombies.children.each((child) => {
+      const zombie = child as Zombie
+      zombie.destroy()
+      return true
+    })
+    this.completeWave()
   }
 
   private showShop() {
@@ -1667,7 +1722,9 @@ export default class GameScene extends Phaser.Scene {
     }
 
     const { x, y } = this.getRandomEdgeSpawnPoint()
-    const zombie = new Zombie(this, x, y, this.wave)
+    const enemyType = this.pendingBossEnemyType ?? pickEnemyTypeForWave(this.wave)
+    const zombie = new Zombie(this, x, y, this.wave, enemyType)
+    this.pendingBossEnemyType = undefined
 
     this.zombies.add(zombie)
     this.zombiesToSpawn -= 1
@@ -1675,6 +1732,10 @@ export default class GameScene extends Phaser.Scene {
 
   private updateZombieTarget(zombie: Zombie, time: number) {
     zombie.locationState = this.isInsideBase(zombie.x, zombie.y) ? 'insideBase' : 'outsideBase'
+
+    if (this.trySpitterAttack(zombie, time)) {
+      return
+    }
 
     const attackEntry = this.getAliveEntryInAttackRange(zombie)
 
@@ -2058,7 +2119,7 @@ export default class GameScene extends Phaser.Scene {
       return
     }
 
-    entry.barricade.takeDamage(barricadeConfig.zombieAttackDamage)
+    entry.barricade.takeDamage(Math.round(barricadeConfig.zombieAttackDamage * zombie.barricadeDamageMultiplier))
     this.updateBarricadeHud()
 
     if (DEBUG_BARRICADE_ATTACKS) {
@@ -2181,6 +2242,7 @@ export default class GameScene extends Phaser.Scene {
       this.scoreText.setText(`Score ${this.score}`)
       this.cashText.setText(`Cash $${this.cash}`)
       this.spawnZombieDeathEffect(deathX, deathY)
+      this.triggerExploderBurst(zombie, deathX, deathY, false)
       this.showFloatingScore(deathX, deathY, zombie.scoreValue)
       this.cameras.main.shake(70, 0.003)
     }
@@ -2227,6 +2289,105 @@ export default class GameScene extends Phaser.Scene {
     })
   }
 
+  private updateScreamerAuras() {
+    const activeZombies = this.zombies.children.entries.filter((child) => child.active) as Zombie[]
+    const auraZombies = activeZombies.filter((zombie) => zombie.screamRadius > 0)
+
+    activeZombies.forEach((zombie) => {
+      const speedMultiplier = auraZombies.reduce((multiplier, screamer) => {
+        if (screamer === zombie || screamer.screamRadius <= 0) {
+          return multiplier
+        }
+
+        if (Phaser.Math.Distance.Between(zombie.x, zombie.y, screamer.x, screamer.y) > screamer.screamRadius) {
+          return multiplier
+        }
+
+        return Math.max(multiplier, screamer.screamSpeedMultiplier)
+      }, 1)
+
+      zombie.setSpeedMultiplier(speedMultiplier)
+    })
+  }
+
+  private trySpitterAttack(zombie: Zombie, time: number) {
+    if (zombie.enemyType !== 'spitter' || zombie.spitRange <= 0) {
+      return false
+    }
+
+    const sameZone = this.isInsideBase(zombie.x, zombie.y) === this.isInsideBase(this.player.x, this.player.y)
+    const distance = Phaser.Math.Distance.Between(zombie.x, zombie.y, this.player.x, this.player.y)
+
+    if (!sameZone || distance > zombie.spitRange) {
+      return false
+    }
+
+    zombie.navState = 'chasingPlayer'
+    zombie.stopMoving()
+    zombie.rotation = Phaser.Math.Angle.Between(zombie.x, zombie.y, this.player.x, this.player.y)
+
+    if (!zombie.tryAttack(time, zombie.spitCooldownMs)) {
+      return true
+    }
+
+    this.player.takeDamage(zombie.spitDamage)
+    this.updateHealthBar()
+    this.spawnSpitEffect(zombie.x, zombie.y, this.player.x, this.player.y)
+
+    if (this.player.health <= 0) {
+      this.endGame()
+    }
+
+    return true
+  }
+
+  private spawnSpitEffect(fromX: number, fromY: number, toX: number, toY: number) {
+    const acid = this.add.circle(fromX, fromY, 5, 0x9bff59, 0.85).setDepth(5)
+
+    this.tweens.add({
+      targets: acid,
+      x: toX,
+      y: toY,
+      alpha: 0,
+      scale: 1.7,
+      duration: 160,
+      ease: 'Quad.easeOut',
+      onComplete: () => acid.destroy(),
+    })
+  }
+
+  private triggerExploderBurst(zombie: Zombie, x: number, y: number, contactTriggered: boolean) {
+    if (zombie.enemyType !== 'exploder' || zombie.explosionRadius <= 0) {
+      return
+    }
+
+    const burst = this.add.circle(x, y, zombie.explosionRadius, 0xff8c1a, 0.22).setDepth(4)
+    this.tweens.add({
+      targets: burst,
+      alpha: 0,
+      scale: 1.15,
+      duration: 220,
+      ease: 'Quad.easeOut',
+      onComplete: () => burst.destroy(),
+    })
+
+    if (Phaser.Math.Distance.Between(x, y, this.player.x, this.player.y) <= zombie.explosionRadius) {
+      this.player.takeDamage(contactTriggered ? zombie.explosionDamage : Math.round(zombie.explosionDamage * 0.7))
+    }
+
+    this.entryPoints.forEach((entry) => {
+      if (!entry.barricade.isAlive) {
+        return
+      }
+
+      if (Phaser.Math.Distance.Between(x, y, entry.barricade.x, entry.barricade.y) <= zombie.explosionRadius) {
+        entry.barricade.takeDamage(Math.round(zombie.explosionDamage * 0.8))
+      }
+    })
+
+    this.updateBarricadeHud()
+  }
+
   private damagePlayerOnContact(zombie: Zombie, time: number) {
     if (time - this.lastContactDamageAt < 500) {
       return
@@ -2237,6 +2398,23 @@ export default class GameScene extends Phaser.Scene {
     }
 
     this.lastContactDamageAt = time
+
+    if (zombie.enemyType === 'exploder') {
+      const deathX = zombie.x
+      const deathY = zombie.y
+      zombie.destroy()
+      this.triggerExploderBurst(zombie, deathX, deathY, true)
+      this.spawnZombieDeathEffect(deathX, deathY)
+      this.cameras.main.shake(110, 0.006)
+      this.updateHealthBar()
+
+      if (this.player.health <= 0) {
+        this.endGame()
+      }
+
+      return
+    }
+
     this.player.takeDamage(zombie.damage)
     this.updateHealthBar()
 
@@ -2261,6 +2439,7 @@ export default class GameScene extends Phaser.Scene {
     this.waveSpawnTimer?.remove(false)
     this.waveSpawnTimer = undefined
     this.isGameOver = true
+    this.skipRoundButton?.setVisible(false)
     this.player.setVelocity(0, 0)
 
     this.zombies.children.each((child) => {
@@ -2298,6 +2477,7 @@ export default class GameScene extends Phaser.Scene {
     this.physics.world.setBounds(0, 0, gameSize.width, gameSize.height)
     this.pauseButton?.setPosition(gameSize.width - 20, 20)
     this.timerText?.setPosition(gameSize.width - 20, 58)
+    this.skipRoundButton?.setPosition(gameSize.width - 20, 94)
     this.messageText?.setPosition(gameSize.width / 2, 34)
     this.repairHintText?.setPosition(gameSize.width / 2, gameSize.height - 72)
     this.pauseOverlay?.setPosition(gameSize.width / 2, gameSize.height / 2)
