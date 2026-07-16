@@ -1809,6 +1809,11 @@ export default class GameScene extends Phaser.Scene {
       return
     }
 
+    if (itemId === 'healPlayer' && this.player.health >= this.player.maxHealth) {
+      this.showMessage('Health already full')
+      return
+    }
+
     if (!this.spendCash(item.cost)) {
       return
     }
