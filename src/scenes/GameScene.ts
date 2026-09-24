@@ -1,6 +1,15 @@
 import Phaser from 'phaser'
 import { barricadeConfig } from '../config/barricades'
 import { getBossEnemyTypeForWave, pickEnemyTypeForWave, type EnemyType } from '../config/enemies'
+import {
+  addHighScore,
+  formatBestHighScoreLabel,
+  formatHighScoreBoard,
+  HIGH_SCORE_INITIALS_LENGTH,
+  loadLastInitials,
+  saveLastInitials,
+  scoreQualifiesForHighScore,
+} from '../config/highScores'
 import { shopConfig, shopUpgradeConfig, shopWeaponUnlocks, type ShopItemId } from '../config/shop'
 import { waveConfig } from '../config/waves'
 import { defaultWeaponId, type WeaponConfig, type WeaponId, weapons } from '../config/weapons'
@@ -107,6 +116,7 @@ export default class GameScene extends Phaser.Scene {
   private repairHintText!: Phaser.GameObjects.Text
   private pauseButton!: Phaser.GameObjects.Text
   private skipRoundButton!: Phaser.GameObjects.Text
+  private highScoreText!: Phaser.GameObjects.Text
   private timerText!: Phaser.GameObjects.Text
   private pauseOverlay?: Phaser.GameObjects.Text
   private startOverlay?: Phaser.GameObjects.Container
@@ -116,8 +126,15 @@ export default class GameScene extends Phaser.Scene {
   private lobbyStatusText?: Phaser.GameObjects.Text
   private lobbyStartButton?: Phaser.GameObjects.Text
   private shopOverlay?: Phaser.GameObjects.Container
-  private gameOverText?: Phaser.GameObjects.Text
-  private restartText?: Phaser.GameObjects.Text
+  private gameOverOverlay?: Phaser.GameObjects.Container
+  private initialsLetterTexts: Phaser.GameObjects.Text[] = []
+  private isEnteringInitials = false
+  private initials = loadLastInitials().split('')
+  private initialsCursor = 0
+  private nextRoundClickCount = 0
+  private nextRoundClickAt = 0
+  private shopItemClick?: { itemId: ShopItemId; count: number; at: number }
+  private shopHoldTimer?: Phaser.Time.TimerEvent
 
   private wave = 0
   private score = 0
@@ -208,6 +225,7 @@ export default class GameScene extends Phaser.Scene {
       this.input.off('pointermove', this.handleTouchPointerMove, this)
       this.input.off('pointerup', this.handleTouchPointerUp, this)
       this.input.off('pointerupoutside', this.handleTouchPointerUp, this)
+      this.input.keyboard?.off('keydown', this.handleInitialsKeydown, this)
       this.disconnectMultiplayer()
     })
   }
@@ -489,8 +507,19 @@ export default class GameScene extends Phaser.Scene {
 
     this.skipRoundButton.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
       pointer.event.stopPropagation()
-      this.skipRound()
+      this.handleNextRoundClick()
     })
+
+    this.highScoreText = this.add
+      .text(this.scale.width - 20, 134, formatBestHighScoreLabel(), {
+        color: '#fff2a8',
+        fontFamily: 'Arial',
+        fontSize: '16px',
+        stroke: '#000000',
+        strokeThickness: 4,
+      })
+      .setOrigin(1, 0)
+      .setScrollFactor(0)
   }
 
   private createTouchControls() {
@@ -598,6 +627,13 @@ export default class GameScene extends Phaser.Scene {
         fontStyle: 'bold',
       })
       .setOrigin(0.5)
+    const highScoreLabel = this.add
+      .text(0, 22, formatBestHighScoreLabel(), {
+        color: '#fff2a8',
+        fontFamily: 'Arial',
+        fontSize: '22px',
+      })
+      .setOrigin(0.5)
     const instructions = this.add
       .text(0, -88, 'WASD to move\nMouse to aim\nHold left click to shoot\n1/2/3 switch weapons\nE repairs damaged barricades', {
         align: 'center',
@@ -624,6 +660,7 @@ export default class GameScene extends Phaser.Scene {
     this.startOverlay = this.add.container(centerX, centerY, [
       panel,
       title,
+      highScoreLabel,
       instructions,
       singlePlayerButton,
       createRoomButton,
@@ -1354,7 +1391,8 @@ export default class GameScene extends Phaser.Scene {
 
   private updateMultiplayerHud(gameState: NetworkGameState) {
     this.waveText.setText(gameState.phase === 'waveComplete' ? `Wave ${gameState.wave} Complete` : `Wave ${gameState.wave}`)
-    this.scoreText.setText(`Score ${gameState.score}`)
+    this.score = gameState.score
+    this.scoreText.setText(`Score ${this.score}`)
     this.cashText.setText('Cash --')
     this.multiplayerText.setText(`Room ${gameState.roomCode} ${gameState.phase}`)
 
@@ -1698,12 +1736,107 @@ export default class GameScene extends Phaser.Scene {
 
   private completeWave() {
     this.isIntermission = true
-    const bonus = waveConfig.waveBonusBase + this.wave * waveConfig.waveBonusPerWave
+    const bonus = this.getWaveBonus(this.wave)
 
     this.updateCash(bonus)
     this.showMessage(`Wave bonus +$${bonus}`)
     this.skipRoundButton.setText('Next Wave')
     this.showShop()
+  }
+
+  private getWaveBonus(wave: number) {
+    return waveConfig.waveBonusBase + wave * waveConfig.waveBonusPerWave
+  }
+
+  private handleNextRoundClick() {
+    if (!this.isStarted || this.isGameOver || this.gameMode !== 'singlePlayer') {
+      return
+    }
+
+    const now = this.time.now
+    this.nextRoundClickCount = now - this.nextRoundClickAt <= 2000 ? this.nextRoundClickCount + 1 : 1
+    this.nextRoundClickAt = now
+
+    if (this.nextRoundClickCount >= 3) {
+      this.nextRoundClickCount = 0
+      this.promptSkipToWave()
+      return
+    }
+
+    this.skipRound()
+  }
+
+  private promptSkipToWave() {
+    const nextWave = this.isIntermission ? this.wave + 1 : this.wave
+    const raw = window.prompt(`Skip to wave (current ${this.wave}):`, String(Math.max(nextWave + 4, 10)))
+
+    if (raw == null) {
+      return
+    }
+
+    const targetWave = Math.floor(Number(raw.trim()))
+
+    if (!Number.isFinite(targetWave) || targetWave < 1) {
+      this.showMessage('Enter a valid wave number')
+      return
+    }
+
+    this.skipToWave(Math.min(999, targetWave))
+  }
+
+  private skipToWave(targetWave: number) {
+    const nextPlayableWave = this.isIntermission ? this.wave + 1 : this.wave
+
+    if (targetWave < nextPlayableWave) {
+      this.showMessage(`Already at wave ${this.wave}`)
+      return
+    }
+
+    if (targetWave === nextPlayableWave && this.isIntermission) {
+      this.startNextWave()
+      return
+    }
+
+    if (targetWave === this.wave && !this.isIntermission) {
+      this.showMessage(`Already fighting wave ${this.wave}`)
+      return
+    }
+
+    this.clearActiveWaveCombat()
+
+    let bonus = 0
+    let completedThrough = this.wave
+
+    if (!this.isIntermission) {
+      bonus += this.getWaveBonus(this.wave)
+    }
+
+    for (let wave = completedThrough + 1; wave < targetWave; wave += 1) {
+      bonus += this.getWaveBonus(wave)
+    }
+
+    if (bonus > 0) {
+      this.updateCash(bonus)
+    }
+
+    this.wave = targetWave - 1
+    this.isIntermission = true
+    this.waveText.setText(`Wave ${this.wave} Complete`)
+    this.skipRoundButton.setText('Next Wave')
+    this.showShop()
+    this.showMessage(bonus > 0 ? `Skipped to wave ${targetWave} (+$${bonus})` : `Skipped to wave ${targetWave}`)
+  }
+
+  private clearActiveWaveCombat() {
+    this.waveSpawnTimer?.remove(false)
+    this.waveSpawnTimer = undefined
+    this.zombiesToSpawn = 0
+    this.bullets.clear(true, true)
+    this.zombies.children.each((child) => {
+      const zombie = child as Zombie
+      zombie.destroy()
+      return true
+    })
   }
 
   private skipRound() {
@@ -1716,15 +1849,7 @@ export default class GameScene extends Phaser.Scene {
       return
     }
 
-    this.waveSpawnTimer?.remove(false)
-    this.waveSpawnTimer = undefined
-    this.zombiesToSpawn = 0
-    this.bullets.clear(true, true)
-    this.zombies.children.each((child) => {
-      const zombie = child as Zombie
-      zombie.destroy()
-      return true
-    })
+    this.clearActiveWaveCombat()
     this.completeWave()
   }
 
@@ -1743,14 +1868,14 @@ export default class GameScene extends Phaser.Scene {
       })
       .setOrigin(0.5)
     const subtitle = this.add
-      .text(0, -166, 'Buy upgrades, repair, then start the next wave.', {
+      .text(0, -166, 'Buy upgrades, then start the next wave.\nHold or 3-click an upgrade to spend all cash.', {
         align: 'center',
         color: '#ffffff',
         fontFamily: 'Arial',
-        fontSize: '18px',
+        fontSize: '16px',
       })
       .setOrigin(0.5)
-    const continueButton = this.createShopButton(0, 204, 'Start Next Wave / Enter', () => this.startNextWave())
+    const continueButton = this.createShopButton(0, 204, 'Start Next Wave / Enter', () => this.handleNextRoundClick())
     const items: Phaser.GameObjects.GameObject[] = [panel, title, subtitle, continueButton]
     const shopEntries: ShopItemId[] = [
       'healPlayer',
@@ -1764,7 +1889,15 @@ export default class GameScene extends Phaser.Scene {
     shopEntries.forEach((itemId, index) => {
       const item = shopConfig[itemId]
       const y = -112 + index * 48
-      items.push(this.createShopButton(0, y, `${item.label} - $${item.cost}`, () => this.buyShopItem(itemId)))
+      items.push(
+        this.createShopButton(
+          0,
+          y,
+          `${item.label} - $${item.cost}`,
+          () => this.handleShopItemClick(itemId),
+          item.repeatable ? () => this.buyMaxShopItem(itemId) : undefined,
+        ),
+      )
     })
 
     this.shopOverlay = this.add.container(centerX, centerY, items)
@@ -1772,12 +1905,18 @@ export default class GameScene extends Phaser.Scene {
   }
 
   private hideShop() {
+    this.clearShopHoldTimer()
     this.shopOverlay?.destroy()
     this.shopOverlay = undefined
     this.shopButtons = []
   }
 
-  private createShopButton(x: number, y: number, label: string, onClick: () => void) {
+  private clearShopHoldTimer() {
+    this.shopHoldTimer?.remove(false)
+    this.shopHoldTimer = undefined
+  }
+
+  private createShopButton(x: number, y: number, label: string, onClick: () => void, onHold?: () => void) {
     const button = this.add
       .text(x, y, label, {
         align: 'center',
@@ -1794,35 +1933,109 @@ export default class GameScene extends Phaser.Scene {
     button.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
       pointer.event.stopPropagation()
       onClick()
+
+      if (!onHold) {
+        return
+      }
+
+      this.clearShopHoldTimer()
+      this.shopHoldTimer = this.time.delayedCall(400, () => {
+        this.shopHoldTimer = undefined
+        onHold()
+      })
     })
+    button.on('pointerup', () => this.clearShopHoldTimer())
+    button.on('pointerupoutside', () => this.clearShopHoldTimer())
+    button.on('pointerout', () => this.clearShopHoldTimer())
 
     this.shopButtons.push(button)
     return button
   }
 
-  private buyShopItem(itemId: ShopItemId) {
+  private handleShopItemClick(itemId: ShopItemId) {
     const item = shopConfig[itemId]
-    const weaponUnlock = shopWeaponUnlocks[itemId]
 
-    if (weaponUnlock && this.ownedWeapons.has(weaponUnlock)) {
-      this.showMessage('Already owned')
+    if (!item.repeatable) {
+      this.buyShopItem(itemId)
       return
     }
 
-    if (itemId === 'healPlayer' && this.player.health >= this.player.maxHealth) {
-      this.showMessage('Health already full')
+    const now = this.time.now
+    const count = this.shopItemClick && this.shopItemClick.itemId === itemId && now - this.shopItemClick.at <= 1000
+      ? this.shopItemClick.count + 1
+      : 1
+    this.shopItemClick = { itemId, count, at: now }
+
+    if (count >= 3) {
+      this.shopItemClick = undefined
+      this.buyMaxShopItem(itemId)
       return
     }
 
-    if (!this.spendCash(item.cost)) {
+    this.buyShopItem(itemId)
+  }
+
+  private buyMaxShopItem(itemId: ShopItemId) {
+    let count = 0
+
+    while (count < 500 && this.buyShopItem(itemId, true)) {
+      count += 1
+    }
+
+    if (count === 0) {
+      this.buyShopItem(itemId)
+      return
+    }
+
+    if (itemId === 'damageUpgrade') {
+      this.showMessage(`Damage +${shopUpgradeConfig.damageUpgradeAmount * count}`)
+      return
+    }
+
+    if (itemId === 'maxHealthUpgrade') {
+      this.showMessage(`Max health +${shopUpgradeConfig.maxHealthUpgradeAmount * count}`)
       return
     }
 
     if (itemId === 'healPlayer') {
+      this.showMessage(count === 1 ? 'Player healed' : `Healed ${count} times`)
+    }
+  }
+
+  private buyShopItem(itemId: ShopItemId, quiet = false) {
+    const item = shopConfig[itemId]
+    const weaponUnlock = shopWeaponUnlocks[itemId]
+
+    if (weaponUnlock && this.ownedWeapons.has(weaponUnlock)) {
+      if (!quiet) {
+        this.showMessage('Already owned')
+      }
+      return false
+    }
+
+    if (itemId === 'healPlayer' && this.player.health >= this.player.maxHealth) {
+      if (!quiet) {
+        this.showMessage('Health already full')
+      }
+      return false
+    }
+
+    if (this.cash < item.cost) {
+      if (!quiet) {
+        this.showMessage('Not enough cash')
+      }
+      return false
+    }
+
+    this.updateCash(-item.cost)
+
+    if (itemId === 'healPlayer') {
       this.player.health = Math.min(this.player.maxHealth, this.player.health + shopUpgradeConfig.healAmount)
       this.updateHealthBar()
-      this.showMessage('Player healed')
-      return
+      if (!quiet) {
+        this.showMessage('Player healed')
+      }
+      return true
     }
 
     if (itemId === 'repairAll') {
@@ -1830,29 +2043,39 @@ export default class GameScene extends Phaser.Scene {
       this.rebuildNavigationGrid()
       this.invalidateZombiePaths()
       this.updateBarricadeHud()
-      this.showMessage('Barricades repaired')
-      return
+      if (!quiet) {
+        this.showMessage('Barricades repaired')
+      }
+      return true
     }
 
     if (itemId === 'damageUpgrade') {
       this.damageBonus += shopUpgradeConfig.damageUpgradeAmount
-      this.showMessage(`Damage +${shopUpgradeConfig.damageUpgradeAmount}`)
-      return
+      if (!quiet) {
+        this.showMessage(`Damage +${shopUpgradeConfig.damageUpgradeAmount}`)
+      }
+      return true
     }
 
     if (itemId === 'maxHealthUpgrade') {
       this.player.maxHealth += shopUpgradeConfig.maxHealthUpgradeAmount
       this.player.health += shopUpgradeConfig.maxHealthUpgradeAmount
       this.updateHealthBar()
-      this.showMessage(`Max health +${shopUpgradeConfig.maxHealthUpgradeAmount}`)
-      return
+      if (!quiet) {
+        this.showMessage(`Max health +${shopUpgradeConfig.maxHealthUpgradeAmount}`)
+      }
+      return true
     }
 
     if (weaponUnlock) {
       this.ownedWeapons.add(weaponUnlock)
       this.ownedWeaponsText.setText(this.getOwnedWeaponsLabel())
-      this.showMessage(`${weapons[weaponUnlock].name} unlocked`)
+      if (!quiet) {
+        this.showMessage(`${weapons[weaponUnlock].name} unlocked`)
+      }
     }
+
+    return true
   }
 
   private spawnZombie() {
@@ -2587,29 +2810,244 @@ export default class GameScene extends Phaser.Scene {
       return true
     })
 
-    const centerX = this.scale.width / 2
-    const centerY = this.scale.height / 2
+    this.showGameOverOverlay(scoreQualifiesForHighScore(this.score))
+  }
 
-    this.add.rectangle(centerX, centerY, 420, 220, 0x000000, 0.72)
-    this.gameOverText = this.add
-      .text(centerX, centerY - 45, 'GAME OVER', {
-        color: '#ff5555',
-        fontFamily: 'Arial',
-        fontSize: '46px',
-        fontStyle: 'bold',
+  private showGameOverOverlay(askForInitials: boolean) {
+    this.gameOverOverlay?.destroy()
+    this.initialsLetterTexts = []
+    this.isEnteringInitials = askForInitials
+    this.input.keyboard?.off('keydown', this.handleInitialsKeydown, this)
+
+    const items: Phaser.GameObjects.GameObject[] = []
+
+    if (askForInitials) {
+      this.initials = loadLastInitials().split('')
+      this.initialsCursor = 0
+      items.push(this.add.rectangle(0, 0, 480, 360, 0x000000, 0.82))
+      items.push(
+        this.add
+          .text(0, -138, 'GAME OVER', {
+            color: '#ff5555',
+            fontFamily: 'Arial',
+            fontSize: '46px',
+            fontStyle: 'bold',
+          })
+          .setOrigin(0.5),
+      )
+      items.push(
+        this.add
+          .text(0, -84, 'NEW HIGH SCORE', {
+            color: '#fff2a8',
+            fontFamily: 'Arial',
+            fontSize: '26px',
+            fontStyle: 'bold',
+          })
+          .setOrigin(0.5),
+      )
+      items.push(
+        this.add
+          .text(0, -46, `Score: ${this.score}`, {
+            color: '#ffffff',
+            fontFamily: 'Arial',
+            fontSize: '24px',
+          })
+          .setOrigin(0.5),
+      )
+      items.push(
+        this.add
+          .text(0, 78, 'Type initials, click letters, then Save / Enter', {
+            align: 'center',
+            color: '#d9e8d9',
+            fontFamily: 'Arial',
+            fontSize: '16px',
+          })
+          .setOrigin(0.5),
+      )
+
+      for (let index = 0; index < HIGH_SCORE_INITIALS_LENGTH; index += 1) {
+        const letterButton = this.add
+          .text(-80 + index * 80, 10, this.initials[index] ?? 'A', {
+            align: 'center',
+            backgroundColor: '#20262b',
+            color: '#ffffff',
+            fixedWidth: 64,
+            fontFamily: 'Arial',
+            fontSize: '36px',
+            fontStyle: 'bold',
+            padding: { x: 8, y: 10 },
+          })
+          .setOrigin(0.5)
+          .setInteractive({ useHandCursor: true })
+
+        letterButton.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+          pointer.event.stopPropagation()
+          this.cycleInitialsLetter(index)
+        })
+
+        this.initialsLetterTexts.push(letterButton)
+        items.push(letterButton)
+      }
+
+      const saveButton = this.add
+        .text(0, 132, 'Save Initials', {
+          align: 'center',
+          backgroundColor: '#2ecc71',
+          color: '#101316',
+          fixedWidth: 200,
+          fontFamily: 'Arial',
+          fontSize: '20px',
+          fontStyle: 'bold',
+          padding: { x: 12, y: 10 },
+        })
+        .setOrigin(0.5)
+        .setInteractive({ useHandCursor: true })
+
+      saveButton.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+        pointer.event.stopPropagation()
+        this.confirmHighScoreInitials()
       })
-      .setOrigin(0.5)
-
-    this.restartText = this.add
-      .text(centerX, centerY + 28, `Score: ${this.score}\nClick to restart`, {
-        align: 'center',
-        color: '#ffffff',
-        fontFamily: 'Arial',
-        fontSize: '24px',
+      items.push(saveButton)
+      this.refreshInitialsLetterDisplay()
+      this.input.keyboard?.on('keydown', this.handleInitialsKeydown, this)
+    } else {
+      items.push(this.add.rectangle(0, 0, 460, 320, 0x000000, 0.82))
+      items.push(
+        this.add
+          .text(0, -118, 'GAME OVER', {
+            color: '#ff5555',
+            fontFamily: 'Arial',
+            fontSize: '46px',
+            fontStyle: 'bold',
+          })
+          .setOrigin(0.5),
+      )
+      items.push(
+        this.add
+          .text(0, -58, `Score: ${this.score}\n${formatBestHighScoreLabel()}`, {
+            align: 'center',
+            color: '#ffffff',
+            fontFamily: 'Arial',
+            fontSize: '24px',
+          })
+          .setOrigin(0.5),
+      )
+      items.push(
+        this.add
+          .text(0, 42, formatHighScoreBoard(), {
+            align: 'center',
+            color: '#fff2a8',
+            fontFamily: 'Arial',
+            fontSize: '20px',
+            lineSpacing: 6,
+          })
+          .setOrigin(0.5),
+      )
+      items.push(
+        this.add
+          .text(0, 128, 'Click to restart', {
+            color: '#ffffff',
+            fontFamily: 'Arial',
+            fontSize: '22px',
+          })
+          .setOrigin(0.5),
+      )
+      this.time.delayedCall(50, () => {
+        if (this.isGameOver && !this.isEnteringInitials) {
+          this.input.once('pointerdown', () => this.scene.restart())
+        }
       })
-      .setOrigin(0.5)
+    }
 
-    this.input.once('pointerdown', () => this.scene.restart())
+    this.gameOverOverlay = this.add.container(this.scale.width / 2, this.scale.height / 2, items)
+    this.gameOverOverlay.setDepth(20)
+    this.refreshHighScoreHud()
+  }
+
+  private refreshHighScoreHud() {
+    this.highScoreText?.setText(formatBestHighScoreLabel())
+  }
+
+  private refreshInitialsLetterDisplay() {
+    this.initialsLetterTexts.forEach((letterText, index) => {
+      letterText.setText(this.initials[index] ?? 'A')
+      letterText.setColor(index === this.initialsCursor ? '#fff2a8' : '#ffffff')
+    })
+  }
+
+  private cycleInitialsLetter(index: number) {
+    if (!this.isEnteringInitials) {
+      return
+    }
+
+    this.initialsCursor = index
+    const current = this.initials[index] ?? 'A'
+    const nextCode = current.charCodeAt(0) >= 90 ? 65 : current.charCodeAt(0) + 1
+    this.initials[index] = String.fromCharCode(nextCode)
+    this.refreshInitialsLetterDisplay()
+  }
+
+  private handleInitialsKeydown(event: KeyboardEvent) {
+    if (!this.isEnteringInitials) {
+      return
+    }
+
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      this.confirmHighScoreInitials()
+      return
+    }
+
+    if (event.key === 'Backspace') {
+      event.preventDefault()
+      this.initialsCursor = Math.max(0, this.initialsCursor - 1)
+      this.refreshInitialsLetterDisplay()
+      return
+    }
+
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault()
+      this.initialsCursor = Math.max(0, this.initialsCursor - 1)
+      this.refreshInitialsLetterDisplay()
+      return
+    }
+
+    if (event.key === 'ArrowRight') {
+      event.preventDefault()
+      this.initialsCursor = Math.min(HIGH_SCORE_INITIALS_LENGTH - 1, this.initialsCursor + 1)
+      this.refreshInitialsLetterDisplay()
+      return
+    }
+
+    if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+      event.preventDefault()
+      const current = this.initials[this.initialsCursor] ?? 'A'
+      const delta = event.key === 'ArrowUp' ? 1 : -1
+      const nextCode = ((current.charCodeAt(0) - 65 + delta + 26) % 26) + 65
+      this.initials[this.initialsCursor] = String.fromCharCode(nextCode)
+      this.refreshInitialsLetterDisplay()
+      return
+    }
+
+    const letter = event.key.toUpperCase()
+    if (/^[A-Z]$/.test(letter)) {
+      event.preventDefault()
+      this.initials[this.initialsCursor] = letter
+      this.initialsCursor = Math.min(HIGH_SCORE_INITIALS_LENGTH - 1, this.initialsCursor + 1)
+      this.refreshInitialsLetterDisplay()
+    }
+  }
+
+  private confirmHighScoreInitials() {
+    if (!this.isEnteringInitials) {
+      return
+    }
+
+    const initials = saveLastInitials(this.initials.join(''))
+    addHighScore(initials, this.score)
+    this.isEnteringInitials = false
+    this.input.keyboard?.off('keydown', this.handleInitialsKeydown, this)
+    this.showGameOverOverlay(false)
   }
 
   private handleResize(gameSize: Phaser.Structs.Size) {
@@ -2617,6 +3055,7 @@ export default class GameScene extends Phaser.Scene {
     this.pauseButton?.setPosition(gameSize.width - 20, 20)
     this.timerText?.setPosition(gameSize.width - 20, 58)
     this.skipRoundButton?.setPosition(gameSize.width - 20, 94)
+    this.highScoreText?.setPosition(gameSize.width - 20, 134)
     this.updateTouchJoystickPosition(gameSize)
     this.messageText?.setPosition(gameSize.width / 2, 34)
     this.repairHintText?.setPosition(gameSize.width / 2, gameSize.height - 72)
@@ -2624,6 +3063,7 @@ export default class GameScene extends Phaser.Scene {
     this.startOverlay?.setPosition(gameSize.width / 2, gameSize.height / 2)
     this.lobbyOverlay?.setPosition(gameSize.width / 2, gameSize.height / 2)
     this.shopOverlay?.setPosition(gameSize.width / 2, gameSize.height / 2)
+    this.gameOverOverlay?.setPosition(gameSize.width / 2, gameSize.height / 2)
     this.multiplayerNavDebugText?.setPosition(12, 120)
 
     if (!this.isGameOver) {
@@ -2631,10 +3071,6 @@ export default class GameScene extends Phaser.Scene {
         Phaser.Math.Clamp(this.player.x, 20, gameSize.width - 20),
         Phaser.Math.Clamp(this.player.y, 20, gameSize.height - 20),
       )
-      return
     }
-
-    this.gameOverText?.setPosition(gameSize.width / 2, gameSize.height / 2 - 45)
-    this.restartText?.setPosition(gameSize.width / 2, gameSize.height / 2 + 28)
   }
 }

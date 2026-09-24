@@ -12,6 +12,7 @@ export interface ShopItemConfig {
   id: ShopItemId
   label: string
   cost: number
+  repeatable?: boolean
 }
 
 export const shopConfig: Record<ShopItemId, ShopItemConfig> = {
@@ -19,6 +20,7 @@ export const shopConfig: Record<ShopItemId, ShopItemConfig> = {
     id: 'healPlayer',
     label: 'Heal Player',
     cost: 40,
+    repeatable: true,
   },
   repairAll: {
     id: 'repairAll',
@@ -29,11 +31,13 @@ export const shopConfig: Record<ShopItemId, ShopItemConfig> = {
     id: 'damageUpgrade',
     label: 'Increase Bullet Damage',
     cost: 120,
+    repeatable: true,
   },
   maxHealthUpgrade: {
     id: 'maxHealthUpgrade',
     label: 'Increase Max Health',
     cost: 125,
+    repeatable: true,
   },
   buySmg: {
     id: 'buySmg',
