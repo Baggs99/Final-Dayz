@@ -33,6 +33,9 @@ export function normalizeHighScores(value: unknown): HighScoreEntry[] {
       score: Math.max(0, Math.floor(item.score)),
     }))
     .sort((left, right) => right.score - left.score || left.initials.localeCompare(right.initials))
+    .filter((entry, index, entries) => {
+      return entries.findIndex((other) => other.initials === entry.initials && other.score === entry.score) === index
+    })
     .slice(0, HIGH_SCORE_MAX_ENTRIES)
 }
 

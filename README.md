@@ -46,9 +46,28 @@ Server `.env`:
 ```text
 PORT=3001
 CLIENT_ORIGIN=http://localhost:5173,https://zombie.baglini.co
+DATABASE_URL=postgresql://USER:PASSWORD@HOST/finaldayz?sslmode=require
 ```
 
-On Render, `PORT` is provided automatically.
+On Render, `PORT` is provided automatically. `DATABASE_URL` should point at a free Neon or Supabase Postgres database so high scores survive across browsers and friends.
+
+### Shared High Scores
+
+The client still caches the top 5 in `localStorage`. The live board is stored in Postgres on the multiplayer server.
+
+1. Create a free Neon project at [neon.tech](https://neon.tech) (Supabase works the same way).
+2. Copy the connection string into `server/.env` as `DATABASE_URL`.
+3. Add the same `DATABASE_URL` to the Render web service.
+4. The server creates the `high_scores` table on boot.
+
+Endpoints:
+
+```text
+GET  /high-scores
+POST /high-scores
+```
+
+If the database is missing or the free Render service is asleep, the game falls back to the local cache and retries qualifying local scores on the next successful sync.
 
 ## Render Deployment
 
@@ -90,6 +109,7 @@ Environment variables:
 
 ```text
 CLIENT_ORIGIN=https://zombie.baglini.co
+DATABASE_URL=postgresql://USER:PASSWORD@HOST/finaldayz?sslmode=require
 ```
 
 If you also want to allow local testing against the deployed server, use a comma-separated list:

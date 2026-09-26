@@ -1,6 +1,8 @@
 import cors from 'cors'
 import express from 'express'
+import { existsSync } from 'node:fs'
 import { createServer } from 'node:http'
+import { resolve } from 'node:path'
 import { Server, type Socket } from 'socket.io'
 import {
   createServerPlayer,
@@ -15,6 +17,15 @@ import {
 } from './game/simulation.js'
 import type { PlayerShotPayload, ServerPlayer, ServerRoom } from './game/types.js'
 import { isWeaponId, serverWeapons } from './game/weapons.js'
+import {
+  addHighScore,
+  ensureHighScoreTable,
+  isHighScoreStoreConfigured,
+  listHighScores,
+  parseHighScorePayload,
+} from './highScores.js'
+
+loadLocalEnv()
 
 const PORT = Number(process.env.PORT) || 3001
 const DEFAULT_CLIENT_ORIGINS = ['http://localhost:5173', 'https://zombie.baglini.co']
@@ -25,8 +36,42 @@ const lastShotAtBySocket = new Map<string, number>()
 
 const app = express()
 app.use(cors({ origin: validateCorsOrigin }))
+app.use(express.json({ limit: '16kb' }))
 app.get('/health', (_req, res) => {
-  res.json({ ok: true })
+  res.json({ ok: true, highScores: isHighScoreStoreConfigured() })
+})
+app.get('/high-scores', async (_req, res) => {
+  if (!isHighScoreStoreConfigured()) {
+    res.status(503).json({ error: 'High scores are not configured', scores: [] })
+    return
+  }
+
+  try {
+    res.json({ scores: await listHighScores() })
+  } catch (error) {
+    console.error('Failed to load high scores', error)
+    res.status(503).json({ error: 'High scores unavailable', scores: [] })
+  }
+})
+app.post('/high-scores', async (req, res) => {
+  if (!isHighScoreStoreConfigured()) {
+    res.status(503).json({ error: 'High scores are not configured', scores: [] })
+    return
+  }
+
+  const entry = parseHighScorePayload(req.body)
+
+  if (!entry) {
+    res.status(400).json({ error: 'Invalid high score', scores: [] })
+    return
+  }
+
+  try {
+    res.json({ scores: await addHighScore(entry.initials, entry.score) })
+  } catch (error) {
+    console.error('Failed to save high score', error)
+    res.status(503).json({ error: 'High scores unavailable', scores: [] })
+  }
 })
 
 const httpServer = createServer(app)
@@ -130,6 +175,21 @@ httpServer.listen(PORT, () => {
   console.log(`Final Dayz multiplayer server listening on ${PORT}`)
   console.log(`Allowed client origins: ${allowedOrigins.join(', ')}`)
   console.log(`Health check: http://localhost:${PORT}/health`)
+  console.log(
+    isHighScoreStoreConfigured()
+      ? 'High scores: Postgres-backed /high-scores'
+      : 'High scores: DATABASE_URL is not set; /high-scores will return 503',
+  )
+
+  if (isHighScoreStoreConfigured()) {
+    ensureHighScoreTable()
+      .then(() => {
+        console.log('High scores table is ready')
+      })
+      .catch((error) => {
+        console.error('Failed to prepare high scores table', error)
+      })
+  }
 })
 
 function createRoomCode() {
@@ -298,6 +358,20 @@ function emitRoomState(room: ServerRoom) {
 
 function toNumber(value: unknown, fallback: number) {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
+
+function loadLocalEnv() {
+  const envPath = resolve(process.cwd(), '.env')
+
+  if (!existsSync(envPath) || typeof process.loadEnvFile !== 'function') {
+    return
+  }
+
+  try {
+    process.loadEnvFile(envPath)
+  } catch {
+    // Keep process env as-is if the local file cannot be loaded.
+  }
 }
 
 function parseAllowedOrigins(value: string | undefined) {

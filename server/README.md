@@ -13,7 +13,11 @@ The server defaults to `http://localhost:3001` and exposes:
 
 ```text
 GET /health
+GET /high-scores
+POST /high-scores
 ```
+
+Set `DATABASE_URL` to a Neon or Supabase Postgres connection string. The server creates the `high_scores` table automatically. Without `DATABASE_URL`, `/high-scores` returns 503 and the client uses its local cache.
 
 Default local CORS origin:
 
@@ -35,6 +39,7 @@ Environment variables:
 
 ```text
 CLIENT_ORIGIN=https://zombie.baglini.co
+DATABASE_URL=postgresql://USER:PASSWORD@HOST/finaldayz?sslmode=require
 ```
 
 `CLIENT_ORIGIN` supports comma-separated values. To allow both production and local development against the same server:

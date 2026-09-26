@@ -2,7 +2,6 @@ import Phaser from 'phaser'
 import { barricadeConfig } from '../config/barricades'
 import { getBossEnemyTypeForWave, pickEnemyTypeForWave, type EnemyType } from '../config/enemies'
 import {
-  addHighScore,
   formatBestHighScoreLabel,
   formatHighScoreBoard,
   HIGH_SCORE_INITIALS_LENGTH,
@@ -10,6 +9,7 @@ import {
   saveLastInitials,
   scoreQualifiesForHighScore,
 } from '../config/highScores'
+import { persistHighScore, syncHighScoresFromServer } from '../network/highScoreClient'
 import { shopConfig, shopUpgradeConfig, shopWeaponUnlocks, type ShopItemId } from '../config/shop'
 import { waveConfig } from '../config/waves'
 import { defaultWeaponId, type WeaponConfig, type WeaponId, weapons } from '../config/weapons'
@@ -117,6 +117,8 @@ export default class GameScene extends Phaser.Scene {
   private pauseButton!: Phaser.GameObjects.Text
   private skipRoundButton!: Phaser.GameObjects.Text
   private highScoreText!: Phaser.GameObjects.Text
+  private startHighScoreLabel?: Phaser.GameObjects.Text
+  private isSavingHighScore = false
   private timerText!: Phaser.GameObjects.Text
   private pauseOverlay?: Phaser.GameObjects.Text
   private startOverlay?: Phaser.GameObjects.Container
@@ -217,6 +219,7 @@ export default class GameScene extends Phaser.Scene {
     this.createHud()
     this.createTouchControls()
     this.showStartScreen()
+    this.syncLeaderboard()
 
     this.scale.on('resize', this.handleResize, this)
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
@@ -627,7 +630,7 @@ export default class GameScene extends Phaser.Scene {
         fontStyle: 'bold',
       })
       .setOrigin(0.5)
-    const highScoreLabel = this.add
+    this.startHighScoreLabel = this.add
       .text(0, 22, formatBestHighScoreLabel(), {
         color: '#fff2a8',
         fontFamily: 'Arial',
@@ -660,7 +663,7 @@ export default class GameScene extends Phaser.Scene {
     this.startOverlay = this.add.container(centerX, centerY, [
       panel,
       title,
-      highScoreLabel,
+      this.startHighScoreLabel,
       instructions,
       singlePlayerButton,
       createRoomButton,
@@ -699,6 +702,7 @@ export default class GameScene extends Phaser.Scene {
     this.skipRoundButton.setVisible(mode === 'singlePlayer')
     this.startOverlay?.destroy()
     this.startOverlay = undefined
+    this.startHighScoreLabel = undefined
     this.multiplayerStatusText = undefined
     this.isIntermission = true
     this.multiplayerText.setText(this.activeRoomCode ? `Room ${this.activeRoomCode}` : '')
@@ -807,6 +811,7 @@ export default class GameScene extends Phaser.Scene {
   private showLobbyOverlay() {
     this.startOverlay?.destroy()
     this.startOverlay = undefined
+    this.startHighScoreLabel = undefined
     this.multiplayerStatusText = undefined
     this.lobbyOverlay?.destroy()
 
@@ -2965,7 +2970,43 @@ export default class GameScene extends Phaser.Scene {
   }
 
   private refreshHighScoreHud() {
-    this.highScoreText?.setText(formatBestHighScoreLabel())
+    const label = formatBestHighScoreLabel()
+    this.highScoreText?.setText(label)
+    this.startHighScoreLabel?.setText(label)
+  }
+
+  private syncLeaderboard() {
+    void syncHighScoresFromServer().then(() => {
+      if (!this.sys.isActive()) {
+        return
+      }
+
+      this.refreshHighScoreHud()
+    })
+  }
+
+  private showSavingHighScoreOverlay() {
+    this.gameOverOverlay?.destroy()
+    this.initialsLetterTexts = []
+    this.gameOverOverlay = this.add.container(this.scale.width / 2, this.scale.height / 2, [
+      this.add.rectangle(0, 0, 460, 240, 0x000000, 0.82),
+      this.add
+        .text(0, -24, 'GAME OVER', {
+          color: '#ff5555',
+          fontFamily: 'Arial',
+          fontSize: '46px',
+          fontStyle: 'bold',
+        })
+        .setOrigin(0.5),
+      this.add
+        .text(0, 36, 'Saving high score...', {
+          color: '#fff2a8',
+          fontFamily: 'Arial',
+          fontSize: '22px',
+        })
+        .setOrigin(0.5),
+    ])
+    this.gameOverOverlay.setDepth(20)
   }
 
   private refreshInitialsLetterDisplay() {
@@ -3039,15 +3080,25 @@ export default class GameScene extends Phaser.Scene {
   }
 
   private confirmHighScoreInitials() {
-    if (!this.isEnteringInitials) {
+    if (!this.isEnteringInitials || this.isSavingHighScore) {
       return
     }
 
     const initials = saveLastInitials(this.initials.join(''))
-    addHighScore(initials, this.score)
     this.isEnteringInitials = false
+    this.isSavingHighScore = true
     this.input.keyboard?.off('keydown', this.handleInitialsKeydown, this)
-    this.showGameOverOverlay(false)
+    this.showSavingHighScoreOverlay()
+
+    void persistHighScore(initials, this.score).then(() => {
+      this.isSavingHighScore = false
+
+      if (!this.sys.isActive() || !this.isGameOver) {
+        return
+      }
+
+      this.showGameOverOverlay(false)
+    })
   }
 
   private handleResize(gameSize: Phaser.Structs.Size) {
