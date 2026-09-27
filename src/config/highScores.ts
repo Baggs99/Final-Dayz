@@ -1,7 +1,17 @@
 export const HIGH_SCORE_STORAGE_KEY = 'finalDayz.highScores'
 export const LAST_INITIALS_STORAGE_KEY = 'finalDayz.lastInitials'
+export const PERSONAL_BEST_STORAGE_KEY = 'finalDayz.personalBest'
+export const SHARE_RUN_URL = 'https://zombie.baglini.co'
 export const HIGH_SCORE_INITIALS_LENGTH = 3
 export const HIGH_SCORE_MAX_ENTRIES = 5
+
+export type PersonalBest = {
+  initials: string
+  score: number
+  wave: number
+  kills: number
+  at: string
+}
 
 export type HighScoreEntry = {
   initials: string
@@ -108,14 +118,79 @@ export function addHighScore(initials: string, score: number, entries = loadHigh
   return saveHighScores(next)
 }
 
+export function formatScore(score: number) {
+  return Math.max(0, Math.floor(score)).toLocaleString('en-US')
+}
+
 export function formatBestHighScoreLabel(entry = getBestHighScore()): string {
-  return entry ? `Best ${entry.initials} ${entry.score}` : 'Best --- 0'
+  return entry ? `Best: ${entry.initials} ${formatScore(entry.score)}` : 'Best: --- 0'
 }
 
 export function formatHighScoreBoard(entries = loadHighScores()): string {
   if (entries.length === 0) {
-    return 'No high scores yet'
+    return 'No scores yet'
   }
 
-  return entries.map((entry, index) => `${index + 1}. ${entry.initials}  ${entry.score}`).join('\n')
+  return entries.map((entry, index) => `${index + 1}. ${entry.initials}  ${formatScore(entry.score)}`).join('\n')
+}
+
+export function formatPointsShortOfBoard(score: number, entries = loadHighScores()): string | undefined {
+  if (scoreQualifiesForHighScore(score, entries) || entries.length < HIGH_SCORE_MAX_ENTRIES) {
+    return undefined
+  }
+
+  const cutoff = entries[entries.length - 1].score
+  const short = Math.max(1, cutoff - Math.floor(score) + (score >= cutoff ? 1 : 0))
+  return `Top 5 cutoff: ${formatScore(cutoff)}\nYou were ${formatScore(short)} points short`
+}
+
+export function loadPersonalBest(): PersonalBest | undefined {
+  try {
+    const raw = window.localStorage.getItem(PERSONAL_BEST_STORAGE_KEY)
+    if (!raw) {
+      return undefined
+    }
+
+    const parsed = JSON.parse(raw) as Partial<PersonalBest>
+    if (typeof parsed.score !== 'number' || !Number.isFinite(parsed.score)) {
+      return undefined
+    }
+
+    return {
+      initials: sanitizeInitials(parsed.initials ?? 'AAA'),
+      score: Math.max(0, Math.floor(parsed.score)),
+      wave: typeof parsed.wave === 'number' ? Math.max(0, Math.floor(parsed.wave)) : 0,
+      kills: typeof parsed.kills === 'number' ? Math.max(0, Math.floor(parsed.kills)) : 0,
+      at: typeof parsed.at === 'string' ? parsed.at : '',
+    }
+  } catch {
+    return undefined
+  }
+}
+
+export function savePersonalBest(entry: PersonalBest) {
+  const next: PersonalBest = {
+    initials: sanitizeInitials(entry.initials),
+    score: Math.max(0, Math.floor(entry.score)),
+    wave: Math.max(0, Math.floor(entry.wave)),
+    kills: Math.max(0, Math.floor(entry.kills)),
+    at: entry.at,
+  }
+
+  try {
+    window.localStorage.setItem(PERSONAL_BEST_STORAGE_KEY, JSON.stringify(next))
+  } catch {
+    // The run can still show the best even if storage is blocked.
+  }
+
+  return next
+}
+
+export function formatPersonalBestLabel(entry = loadPersonalBest()) {
+  return entry ? `Personal Best: ${formatScore(entry.score)} — Wave ${entry.wave}` : 'Personal Best: none yet'
+}
+
+export function buildShareText(input: { score: number; wave: number; perks: string[] }) {
+  const perkLine = input.perks.length > 0 ? `\nPerks: ${input.perks.join(', ')}` : ''
+  return `I survived to Wave ${input.wave} in Final Dayz with ${formatScore(input.score)} points.${perkLine}\nBeat me: ${SHARE_RUN_URL}`
 }

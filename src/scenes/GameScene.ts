@@ -2,11 +2,18 @@ import Phaser from 'phaser'
 import { barricadeConfig } from '../config/barricades'
 import { enemyConfigs, getBossEnemyTypeForWave, pickEnemyTypeForWave, type EnemyType } from '../config/enemies'
 import {
+  buildShareText,
   formatBestHighScoreLabel,
   formatHighScoreBoard,
+  formatPersonalBestLabel,
+  formatPointsShortOfBoard,
+  formatScore,
   HIGH_SCORE_INITIALS_LENGTH,
+  loadHighScores,
   loadLastInitials,
+  loadPersonalBest,
   saveLastInitials,
+  savePersonalBest,
   scoreQualifiesForHighScore,
 } from '../config/highScores'
 import { persistHighScore, syncHighScoresFromServer } from '../network/highScoreClient'
@@ -125,6 +132,13 @@ export default class GameScene extends Phaser.Scene {
   private healthBarBg!: Phaser.GameObjects.Rectangle
   private healthBarMaxWidth = 200
   private startHighScoreLabel?: Phaser.GameObjects.Text
+  private startBoardText?: Phaser.GameObjects.Text
+  private startSourceText?: Phaser.GameObjects.Text
+  private startPersonalText?: Phaser.GameObjects.Text
+  private scoreSource: 'loading' | 'live' | 'cache' = 'loading'
+  private personalBestAtStart = loadPersonalBest()
+  private runIsPersonalBest = false
+  private announcedPersonalBest = false
   private touchWeaponButton?: Phaser.GameObjects.Text
   private touchRepairButton?: Phaser.GameObjects.Text
   private isSavingHighScore = false
@@ -267,6 +281,7 @@ export default class GameScene extends Phaser.Scene {
       this.input.off('pointerdown', this.unlockAudio, this)
       this.input.keyboard?.off('keydown', this.unlockAudio, this)
       this.input.keyboard?.off('keydown', this.handleInitialsKeydown, this)
+      this.clearShareFallback()
       this.disconnectMultiplayer()
     })
   }
@@ -765,35 +780,68 @@ export default class GameScene extends Phaser.Scene {
     const compact = this.isCompactMenu()
     const centerX = this.scale.width / 2
     const centerY = this.scale.height / 2
-    const panel = this.add.rectangle(0, 0, compact ? 360 : 680, compact ? 500 : 540, 0x000000, 0.82)
+    const panel = this.add.rectangle(0, 0, compact ? 360 : 680, compact ? 640 : 660, 0x000000, 0.94)
     const title = this.add
-      .text(0, compact ? -200 : -205, 'FINAL DAYZ', {
+      .text(0, compact ? -292 : -300, 'FINAL DAYZ', {
         color: '#ff5555',
         fontFamily: 'Arial',
-        fontSize: compact ? 34 : 56,
+        fontSize: compact ? 32 : 52,
         fontStyle: 'bold',
       })
       .setOrigin(0.5)
-    this.startHighScoreLabel = this.add
-      .text(0, compact ? 8 : 22, formatBestHighScoreLabel(), {
-        color: '#fff2a8',
-        fontFamily: 'Arial',
-        fontSize: compact ? 16 : 22,
-      })
-      .setOrigin(0.5)
     const instructions = this.add
-      .text(0, compact ? -100 : -88, this.getStartInstructions(), {
+      .text(0, compact ? -236 : -230, this.getStartInstructions(), {
         align: 'center',
         color: '#ffffff',
         fontFamily: 'Arial',
-        fontSize: compact ? 15 : 22,
-        lineSpacing: compact ? 6 : 10,
+        fontSize: compact ? 14 : 18,
+        lineSpacing: compact ? 4 : 6,
       })
       .setOrigin(0.5)
-    const buttonY = compact ? 64 : 72
-    const buttonGap = compact ? 58 : 62
+    this.startHighScoreLabel = this.add
+      .text(0, compact ? -168 : -150, formatBestHighScoreLabel(), {
+        color: '#fff2a8',
+        fontFamily: 'Arial',
+        fontSize: compact ? 18 : 24,
+        fontStyle: 'bold',
+      })
+      .setOrigin(0.5)
+    this.startPersonalText = this.add
+      .text(0, compact ? -142 : -118, formatPersonalBestLabel(), {
+        color: '#d9e8d9',
+        fontFamily: 'Arial',
+        fontSize: compact ? 13 : 16,
+      })
+      .setOrigin(0.5)
+    this.startBoardText = this.add
+      .text(0, compact ? -78 : -40, this.formatStartBoard(), {
+        align: 'center',
+        color: '#fff2a8',
+        fontFamily: 'Arial',
+        fontSize: compact ? 15 : 18,
+        lineSpacing: 4,
+      })
+      .setOrigin(0.5)
+    this.startSourceText = this.add
+      .text(0, compact ? -8 : 48, this.formatScoreSourceNote(), {
+        color: '#8d9794',
+        fontFamily: 'Arial',
+        fontSize: compact ? 13 : 14,
+      })
+      .setOrigin(0.5)
+    const buttonY = compact ? 40 : 100
+    const buttonGap = compact ? 52 : 58
     const singlePlayerButton = this.createStartMenuButton(0, buttonY, 'Single Player', 0x2ecc71, () => this.startGame('singlePlayer'))
-    const menuItems: Phaser.GameObjects.GameObject[] = [panel, title, this.startHighScoreLabel, instructions, singlePlayerButton]
+    const menuItems: Phaser.GameObjects.GameObject[] = [
+      panel,
+      title,
+      instructions,
+      this.startHighScoreLabel,
+      this.startPersonalText,
+      this.startBoardText,
+      this.startSourceText,
+      singlePlayerButton,
+    ]
 
     if (this.coopDebug) {
       menuItems.push(this.createStartMenuButton(0, buttonY + buttonGap, 'Create Co-op Room', 0x4aa3ff, () => this.createCoopRoom()))
@@ -825,12 +873,21 @@ export default class GameScene extends Phaser.Scene {
       )
       menuItems.push(
         this.add
-          .text(0, buttonY + buttonGap + (compact ? 36 : 42), 'Online co-op is being rebuilt\nfor smoother gameplay.', {
+          .text(0, buttonY + buttonGap + (compact ? 28 : 34), 'Online co-op is being rebuilt for smoother play.', {
+            align: 'center',
+            color: '#6f7874',
+            fontFamily: 'Arial',
+            fontSize: compact ? 13 : 15,
+          })
+          .setOrigin(0.5),
+      )
+      menuItems.push(
+        this.add
+          .text(0, buttonY + buttonGap + (compact ? 58 : 68), 'Daily Challenge coming soon', {
             align: 'center',
             color: '#6f7874',
             fontFamily: 'Arial',
             fontSize: compact ? 14 : 16,
-            lineSpacing: 4,
           })
           .setOrigin(0.5),
       )
@@ -880,6 +937,9 @@ export default class GameScene extends Phaser.Scene {
     this.startOverlay?.destroy()
     this.startOverlay = undefined
     this.startHighScoreLabel = undefined
+    this.startBoardText = undefined
+    this.startSourceText = undefined
+    this.startPersonalText = undefined
     this.multiplayerStatusText = undefined
     this.layoutHud()
     this.setTouchActionButtonsVisible(true)
@@ -991,6 +1051,9 @@ export default class GameScene extends Phaser.Scene {
     this.startOverlay?.destroy()
     this.startOverlay = undefined
     this.startHighScoreLabel = undefined
+    this.startBoardText = undefined
+    this.startSourceText = undefined
+    this.startPersonalText = undefined
     this.multiplayerStatusText = undefined
     this.lobbyOverlay?.destroy()
 
@@ -1737,7 +1800,7 @@ export default class GameScene extends Phaser.Scene {
     this.scoreText.setFontSize(narrow ? 14 : 20)
     this.cashText.setFontSize(narrow ? 14 : 20)
     this.weaponText.setFontSize(narrow ? 14 : 20)
-    const hideCombatHud = Boolean(this.shopOverlay || this.perkOverlay)
+    const hideCombatHud = Boolean(this.shopOverlay || this.perkOverlay || this.startOverlay || this.gameOverOverlay)
     this.healthBarBg.setVisible(!hideCombatHud)
     this.healthFill.setVisible(!hideCombatHud)
     this.healthText.setVisible(!hideCombatHud)
@@ -1753,6 +1816,7 @@ export default class GameScene extends Phaser.Scene {
     this.refreshPerkHud()
 
     this.pauseButton.setPosition(right, top)
+    this.pauseButton.setVisible(this.isStarted && !this.startOverlay && !this.gameOverOverlay && !this.shopOverlay && !this.perkOverlay)
     this.timerText.setPosition(right, top + 48)
     this.skipRoundButton.setPosition(right, top + 84)
     this.highScoreText.setPosition(right, top + (narrow ? 128 : 134))
@@ -3409,14 +3473,16 @@ export default class GameScene extends Phaser.Scene {
       this.zombiesKilled += 1
       this.updateCash(waveConfig.cashPerKill)
       this.scoreText.setText(`Score ${this.score}`)
+      this.notePersonalBestBeaten()
       const deathColor = zombie.enemyType === 'exploder' ? 0xff8c1a : enemyConfigs[zombie.enemyType].color
       const deathScale = zombie.enemyType === 'warden' ? 1.8 : 1
       this.spawnZombieDeathEffect(deathX, deathY, deathColor, deathScale)
       this.triggerExploderBurst(zombie, deathX, deathY, false)
-      this.showFloatingScore(deathX, deathY, zombie.scoreValue)
+      this.showFloatingScore(deathX, deathY, zombie.scoreValue, zombie.enemyType === 'warden' ? 28 : 18)
       if (zombie.enemyType === 'warden') {
         this.playSound('wardenDeath')
-        this.showMessage('THE WARDEN IS DOWN', 'money')
+        this.showWaveBanner('THE WARDEN IS DOWN', '#8eb4ff')
+        this.showMessage(`THE WARDEN IS DOWN  +${zombie.scoreValue}`, 'money')
         this.cameras.main.shake(150, 0.007)
       } else {
         this.playSound('zombieDeath')
@@ -3444,12 +3510,12 @@ export default class GameScene extends Phaser.Scene {
     }
   }
 
-  private showFloatingScore(x: number, y: number, amount: number) {
+  private showFloatingScore(x: number, y: number, amount: number, fontSize = 18) {
     const scorePopup = this.add
       .text(x, y - 24, `+${amount}`, {
         color: '#fff2a8',
         fontFamily: 'Arial',
-        fontSize: '18px',
+        fontSize: `${fontSize}px`,
         fontStyle: 'bold',
         stroke: '#000000',
         strokeThickness: 3,
@@ -3615,10 +3681,165 @@ export default class GameScene extends Phaser.Scene {
       return true
     })
 
-    this.showGameOverOverlay(scoreQualifiesForHighScore(this.score))
+    this.recordRunPersonalBest()
+    this.showGameOverOverlay(scoreQualifiesForHighScore(this.score, loadHighScores()))
+  }
+
+  private notePersonalBestBeaten() {
+    if (this.announcedPersonalBest || !this.personalBestAtStart) {
+      return
+    }
+
+    if (this.score <= this.personalBestAtStart.score) {
+      return
+    }
+
+    this.announcedPersonalBest = true
+    this.showMessage('Personal Best beaten!', 'money')
+  }
+
+  private recordRunPersonalBest() {
+    const previous = this.personalBestAtStart
+    this.runIsPersonalBest = this.score > 0 && (!previous || this.score > previous.score)
+    if (!this.runIsPersonalBest) {
+      return
+    }
+
+    savePersonalBest({
+      initials: loadLastInitials(),
+      score: this.score,
+      wave: this.wave,
+      kills: this.zombiesKilled,
+      at: new Date().toISOString(),
+    })
+  }
+
+  private formatStartBoard() {
+    if (this.scoreSource === 'loading' && loadHighScores().length === 0) {
+      return 'Loading scores…'
+    }
+
+    return formatHighScoreBoard(loadHighScores())
+  }
+
+  private formatScoreSourceNote() {
+    if (this.scoreSource === 'loading') {
+      return loadHighScores().length > 0 ? 'Loading scores…' : ''
+    }
+
+    if (this.scoreSource === 'cache') {
+      return loadHighScores().length > 0 ? 'Offline cache' : 'Offline cache · No scores yet'
+    }
+
+    return ''
+  }
+
+  private getShareText() {
+    return buildShareText({
+      score: this.score,
+      wave: this.wave,
+      perks: this.ownedPerks.map((id) => getPerk(id).name),
+    })
+  }
+
+  private copyRunResult() {
+    const text = this.getShareText()
+    if (!navigator.clipboard?.writeText) {
+      this.finishCopy(this.copyWithTextarea(text), text)
+      return
+    }
+
+    void navigator.clipboard.writeText(text).then(() => {
+      if (this.sys.isActive()) {
+        this.showMessage('Run copied', 'money')
+        this.clearShareFallback()
+      }
+    }).catch(() => {
+      this.finishCopy(this.copyWithTextarea(text), text)
+    })
+  }
+
+  private finishCopy(copied: boolean, text: string) {
+    if (!this.sys.isActive()) {
+      return
+    }
+
+    if (copied) {
+      this.showMessage('Run copied', 'money')
+      this.clearShareFallback()
+      return
+    }
+
+    this.showShareFallback(text)
+  }
+
+  private copyWithTextarea(text: string) {
+    const area = document.createElement('textarea')
+    area.value = text
+    area.setAttribute('readonly', 'true')
+    area.style.position = 'fixed'
+    area.style.left = '-9999px'
+    document.body.appendChild(area)
+    area.select()
+    let copied = false
+    try {
+      copied = document.execCommand('copy')
+    } catch {
+      copied = false
+    }
+    area.remove()
+    return copied
+  }
+
+  private showShareFallback(text: string) {
+    this.clearShareFallback()
+    this.showMessage('Copy failed — select the run text', 'warning')
+    const box = document.createElement('textarea')
+    box.id = 'final-dayz-share'
+    box.readOnly = true
+    box.value = text
+    box.style.position = 'fixed'
+    box.style.left = '50%'
+    box.style.bottom = '12px'
+    box.style.transform = 'translateX(-50%)'
+    box.style.width = 'min(360px, 92vw)'
+    box.style.height = '88px'
+    box.style.zIndex = '30'
+    box.style.font = '14px Arial'
+    document.body.appendChild(box)
+    box.focus()
+    box.select()
+  }
+
+  private clearShareFallback() {
+    document.getElementById('final-dayz-share')?.remove()
+  }
+
+  private createResultButton(y: number, label: string, background: string, onClick: () => void) {
+    const button = this.add
+      .text(0, y, label, {
+        align: 'center',
+        backgroundColor: background,
+        color: background === '#2ecc71' ? '#101316' : '#ffffff',
+        fixedWidth: this.isCompactMenu() ? 240 : 220,
+        fontFamily: 'Arial',
+        fontSize: '18px',
+        fontStyle: 'bold',
+        padding: { x: 12, y: 12 },
+      })
+      .setOrigin(0.5)
+      .setInteractive({ useHandCursor: true })
+
+    button.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+      pointer.event.stopPropagation()
+      onClick()
+    })
+
+    return button
   }
 
   private showGameOverOverlay(askForInitials: boolean) {
+    this.clearShareFallback()
     this.gameOverOverlay?.destroy()
     this.initialsLetterTexts = []
     this.isEnteringInitials = askForInitials
@@ -3630,10 +3851,10 @@ export default class GameScene extends Phaser.Scene {
       this.initials = loadLastInitials().split('')
       this.initialsCursor = 0
       const compact = this.isCompactMenu()
-      items.push(this.add.rectangle(0, 0, compact ? 360 : 500, compact ? 500 : 460, 0x000000, 0.82))
+      items.push(this.add.rectangle(0, 0, compact ? 360 : 520, compact ? 640 : 620, 0x000000, 0.9))
       items.push(
         this.add
-          .text(0, compact ? -150 : -138, 'GAME OVER', {
+          .text(0, compact ? -286 : -270, 'GAME OVER', {
             color: '#ff5555',
             fontFamily: 'Arial',
             fontSize: compact ? 32 : 46,
@@ -3643,17 +3864,27 @@ export default class GameScene extends Phaser.Scene {
       )
       items.push(
         this.add
-          .text(0, -84, 'NEW HIGH SCORE', {
+          .text(0, compact ? -244 : -214, 'NEW HIGH SCORE!', {
             color: '#fff2a8',
             fontFamily: 'Arial',
-            fontSize: '26px',
+            fontSize: compact ? 22 : 28,
             fontStyle: 'bold',
           })
           .setOrigin(0.5),
       )
       items.push(
         this.add
-          .text(0, -20, `Score ${this.score}\n${this.formatRunSummary()}`, {
+          .text(0, compact ? -200 : -164, formatScore(this.score), {
+            color: '#ffffff',
+            fontFamily: 'Arial',
+            fontSize: compact ? 36 : 48,
+            fontStyle: 'bold',
+          })
+          .setOrigin(0.5),
+      )
+      items.push(
+        this.add
+          .text(0, compact ? -120 : -78, `${this.formatRunSummary()}${this.runIsPersonalBest ? '\nNew Personal Best!' : ''}`, {
             align: 'center',
             color: '#ffffff',
             fontFamily: 'Arial',
@@ -3664,7 +3895,7 @@ export default class GameScene extends Phaser.Scene {
       )
       items.push(
         this.add
-          .text(0, 52, 'Type initials, click letters, then Save / Enter', {
+          .text(0, compact ? 10 : 28, 'Tap a letter or type. Save when ready.', {
             align: 'center',
             color: '#d9e8d9',
             fontFamily: 'Arial',
@@ -3675,15 +3906,15 @@ export default class GameScene extends Phaser.Scene {
 
       for (let index = 0; index < HIGH_SCORE_INITIALS_LENGTH; index += 1) {
         const letterButton = this.add
-          .text(-80 + index * 80, 108, this.initials[index] ?? 'A', {
+          .text(-88 + index * 88, compact ? 78 : 96, this.initials[index] ?? 'A', {
             align: 'center',
             backgroundColor: '#20262b',
             color: '#ffffff',
-            fixedWidth: 64,
+            fixedWidth: 72,
             fontFamily: 'Arial',
             fontSize: '36px',
             fontStyle: 'bold',
-            padding: { x: 8, y: 10 },
+            padding: { x: 8, y: 14 },
           })
           .setOrigin(0.5)
           .setInteractive({ useHandCursor: true })
@@ -3698,7 +3929,7 @@ export default class GameScene extends Phaser.Scene {
       }
 
       const saveButton = this.add
-        .text(0, 176, 'Save Initials', {
+        .text(0, compact ? 156 : 176, 'Save Initials', {
           align: 'center',
           backgroundColor: '#2ecc71',
           color: '#101316',
@@ -3716,14 +3947,16 @@ export default class GameScene extends Phaser.Scene {
         this.confirmHighScoreInitials()
       })
       items.push(saveButton)
+      items.push(this.createResultButton(compact ? 214 : 236, 'Share Run', '#20262b', () => this.copyRunResult()))
       this.refreshInitialsLetterDisplay()
       this.input.keyboard?.on('keydown', this.handleInitialsKeydown, this)
     } else {
       const compact = this.isCompactMenu()
-      items.push(this.add.rectangle(0, 0, compact ? 360 : 500, compact ? 500 : 460, 0x000000, 0.82))
+      const shortfall = formatPointsShortOfBoard(this.score, loadHighScores())
+      items.push(this.add.rectangle(0, 0, compact ? 360 : 520, compact ? 620 : 600, 0x000000, 0.9))
       items.push(
         this.add
-          .text(0, compact ? -140 : -118, 'GAME OVER', {
+          .text(0, compact ? -270 : -250, 'GAME OVER', {
             color: '#ff5555',
             fontFamily: 'Arial',
             fontSize: compact ? 32 : 46,
@@ -3733,7 +3966,17 @@ export default class GameScene extends Phaser.Scene {
       )
       items.push(
         this.add
-          .text(0, -70, `Score ${this.score}\n${this.formatRunSummary()}\n${formatBestHighScoreLabel()}`, {
+          .text(0, compact ? -214 : -186, formatScore(this.score), {
+            color: '#ffffff',
+            fontFamily: 'Arial',
+            fontSize: compact ? 40 : 52,
+            fontStyle: 'bold',
+          })
+          .setOrigin(0.5),
+      )
+      items.push(
+        this.add
+          .text(0, compact ? -120 : -90, `${this.formatRunSummary()}${this.runIsPersonalBest ? '\nNew Personal Best!' : ''}`, {
             align: 'center',
             color: '#ffffff',
             fontFamily: 'Arial',
@@ -3744,29 +3987,20 @@ export default class GameScene extends Phaser.Scene {
       )
       items.push(
         this.add
-          .text(0, 42, formatHighScoreBoard(), {
+          .text(0, compact ? 20 : 40, shortfall ?? formatBestHighScoreLabel(), {
             align: 'center',
             color: '#fff2a8',
             fontFamily: 'Arial',
-            fontSize: '20px',
-            lineSpacing: 6,
+            fontSize: compact ? 15 : 18,
+            lineSpacing: 4,
           })
           .setOrigin(0.5),
       )
-      items.push(
-        this.add
-          .text(0, 128, 'Click to restart', {
-            color: '#ffffff',
-            fontFamily: 'Arial',
-            fontSize: '22px',
-          })
-          .setOrigin(0.5),
-      )
-      this.time.delayedCall(50, () => {
-        if (this.isGameOver && !this.isEnteringInitials) {
-          this.input.once('pointerdown', () => this.scene.restart())
-        }
-      })
+      items.push(this.createResultButton(compact ? 100 : 130, 'Share Run', '#20262b', () => this.copyRunResult()))
+      items.push(this.createResultButton(compact ? 164 : 196, 'Restart', '#2ecc71', () => {
+        this.clearShareFallback()
+        this.scene.restart()
+      }))
     }
 
     this.gameOverOverlay = this.add.container(this.scale.width / 2, this.scale.height / 2, items)
@@ -3778,19 +4012,26 @@ export default class GameScene extends Phaser.Scene {
     const label = formatBestHighScoreLabel()
     this.highScoreText?.setText(label)
     this.startHighScoreLabel?.setText(label)
+    this.startPersonalText?.setText(formatPersonalBestLabel())
+    this.startBoardText?.setText(this.formatStartBoard())
+    this.startSourceText?.setText(this.formatScoreSourceNote())
   }
 
   private syncLeaderboard() {
-    void syncHighScoresFromServer().then(() => {
+    this.scoreSource = 'loading'
+    this.refreshHighScoreHud()
+    void syncHighScoresFromServer().then((result) => {
       if (!this.sys.isActive()) {
         return
       }
 
+      this.scoreSource = result.source
       this.refreshHighScoreHud()
     })
   }
 
   private showSavingHighScoreOverlay() {
+    this.clearShareFallback()
     this.gameOverOverlay?.destroy()
     this.initialsLetterTexts = []
     this.gameOverOverlay = this.add.container(this.scale.width / 2, this.scale.height / 2, [
@@ -3816,8 +4057,10 @@ export default class GameScene extends Phaser.Scene {
 
   private refreshInitialsLetterDisplay() {
     this.initialsLetterTexts.forEach((letterText, index) => {
+      const active = index === this.initialsCursor
       letterText.setText(this.initials[index] ?? 'A')
-      letterText.setColor(index === this.initialsCursor ? '#fff2a8' : '#ffffff')
+      letterText.setColor(active ? '#fff2a8' : '#ffffff')
+      letterText.setBackgroundColor(active ? '#3d3420' : '#20262b')
     })
   }
 
@@ -3846,7 +4089,10 @@ export default class GameScene extends Phaser.Scene {
 
     if (event.key === 'Backspace') {
       event.preventDefault()
-      this.initialsCursor = Math.max(0, this.initialsCursor - 1)
+      if (this.initialsCursor > 0) {
+        this.initialsCursor -= 1
+      }
+      this.initials[this.initialsCursor] = 'A'
       this.refreshInitialsLetterDisplay()
       return
     }
@@ -3889,7 +4135,16 @@ export default class GameScene extends Phaser.Scene {
       return
     }
 
-    const initials = saveLastInitials(this.initials.join(''))
+    const initials = saveLastInitials(this.initials.join('') || 'AAA')
+    if (this.runIsPersonalBest) {
+      savePersonalBest({
+        initials,
+        score: this.score,
+        wave: this.wave,
+        kills: this.zombiesKilled,
+        at: new Date().toISOString(),
+      })
+    }
     this.isEnteringInitials = false
     this.isSavingHighScore = true
     this.input.keyboard?.off('keydown', this.handleInitialsKeydown, this)

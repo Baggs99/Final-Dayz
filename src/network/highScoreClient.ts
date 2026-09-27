@@ -49,12 +49,17 @@ export async function submitRemoteHighScore(
   }
 }
 
-export async function syncHighScoresFromServer(): Promise<HighScoreEntry[]> {
+export type ScoreSyncResult = {
+  entries: HighScoreEntry[]
+  source: 'live' | 'cache'
+}
+
+export async function syncHighScoresFromServer(): Promise<ScoreSyncResult> {
   const local = loadHighScores()
   const remote = await fetchRemoteHighScores()
 
   if (!remote) {
-    return local
+    return { entries: local, source: 'cache' }
   }
 
   const remoteKeys = new Set(remote.map((entry) => `${entry.initials}:${entry.score}`))
@@ -72,7 +77,7 @@ export async function syncHighScoresFromServer(): Promise<HighScoreEntry[]> {
     }
   }
 
-  return latest
+  return { entries: latest, source: 'live' }
 }
 
 export async function persistHighScore(initials: string, score: number): Promise<HighScoreEntry[]> {
