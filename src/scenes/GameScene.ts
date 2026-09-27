@@ -1,6 +1,7 @@
 import Phaser from 'phaser'
 import { barricadeConfig } from '../config/barricades'
 import { enemyConfigs, getBossEnemyTypeForWave, pickEnemyTypeForWave, type EnemyType } from '../config/enemies'
+import { rollWaveModifier, type WaveModifier } from '../config/waveModifiers'
 import {
   buildShareText,
   formatBestHighScoreLabel,
@@ -221,6 +222,7 @@ export default class GameScene extends Phaser.Scene {
   private messageTimer?: Phaser.Time.TimerEvent
   private waveSpawnTimer?: Phaser.Time.TimerEvent
   private pendingBossEnemyType?: EnemyType
+  private waveModifier?: WaveModifier
   private isIntermission = false
   private isStarted = false
   private isPaused = false
@@ -357,6 +359,7 @@ export default class GameScene extends Phaser.Scene {
       this.zombies.children.each((child) => {
         const zombie = child as Zombie
         this.updateZombieTarget(zombie, time)
+        this.updateWarden(zombie, time)
         this.updateZombieDebugLabel(zombie)
         this.damagePlayerOnContact(zombie, time)
         return true
@@ -1973,10 +1976,11 @@ export default class GameScene extends Phaser.Scene {
         align: 'center',
         color,
         fontFamily: 'Arial',
-        fontSize: this.isNarrowHud() ? '28px' : '40px',
+        fontSize: this.isNarrowHud() ? '26px' : '40px',
         fontStyle: 'bold',
         stroke: '#000000',
         strokeThickness: 6,
+        wordWrap: { width: Math.max(280, this.scale.width - 48) },
       })
       .setOrigin(0.5)
       .setScrollFactor(0)
@@ -2470,18 +2474,20 @@ export default class GameScene extends Phaser.Scene {
 
     this.score += zombie.scoreValue
     this.zombiesKilled += 1
-    this.updateCash(waveConfig.cashPerKill)
+    this.updateCash(zombie.cashValue)
     this.scoreText.setText(`Score ${this.score}`)
     this.notePersonalBestBeaten()
-    const deathColor = zombie.enemyType === 'exploder' ? 0xff8c1a : enemyConfigs[zombie.enemyType].color
-    const deathScale = zombie.enemyType === 'warden' ? 1.8 : 1
+    const deathColor = enemyConfigs[zombie.enemyType].color
+    const deathScale = zombie.enemyType === 'warden' ? 1.9 : zombie.enemyType === 'brute' ? 1.35 : zombie.enemyType === 'screamer' ? 1.25 : 1
     this.spawnZombieDeathEffect(deathX, deathY, deathColor, deathScale)
     this.triggerExploderBurst(zombie, deathX, deathY, false)
     this.showFloatingScore(deathX, deathY, zombie.scoreValue, zombie.enemyType === 'warden' ? 28 : 18)
     if (zombie.enemyType === 'warden') {
       this.playSound('wardenDeath')
       this.showWaveBanner('THE WARDEN IS DOWN', '#8eb4ff')
-      this.showMessage(`THE WARDEN IS DOWN  +${zombie.scoreValue}`, 'money')
+      this.showMessage(`THE WARDEN IS DOWN  +$${zombie.cashValue}`, 'money')
+    const collapse = this.add.circle(deathX, deathY, 20, deathColor, 0.35).setDepth(4)
+    this.tweens.add({ targets: collapse, scale: zombie.enemyType === 'warden' ? 4 : 2.2, alpha: 0, duration: 280, onComplete: () => collapse.destroy() })
       this.cameras.main.shake(150, 0.007)
     } else {
       this.playSound('zombieDeath')
@@ -2669,7 +2675,9 @@ export default class GameScene extends Phaser.Scene {
     this.hideShop()
     this.waveSpawnTimer?.remove(false)
     this.wave += 1
-    this.zombiesToSpawn = waveConfig.baseZombieCount + this.wave * waveConfig.zombiesPerWave
+    this.waveModifier = rollWaveModifier(this.wave)
+    const countMultiplier = this.waveModifier?.countMultiplier ?? 1
+    this.zombiesToSpawn = Math.max(1, Math.round((waveConfig.baseZombieCount + this.wave * waveConfig.zombiesPerWave) * countMultiplier))
     this.pendingBossEnemyType = getBossEnemyTypeForWave(this.wave)
     this.spawnDelay = Math.max(
       waveConfig.minSpawnDelayMs,
@@ -2681,6 +2689,9 @@ export default class GameScene extends Phaser.Scene {
     if (this.pendingBossEnemyType) {
       this.showWaveBanner('Wave 10: THE WARDEN', '#8eb4ff')
       this.playSound('wardenWarn')
+    } else if (this.waveModifier) {
+      this.showWaveBanner(`Wave ${this.wave}: ${this.waveModifier.name}`, '#fff2a8')
+      this.playSound('waveStart')
     } else {
       this.showWaveBanner(`Wave ${this.wave}`)
       this.playSound('waveStart')
@@ -3403,15 +3414,17 @@ export default class GameScene extends Phaser.Scene {
     }
 
     const { x, y } = this.getRandomEdgeSpawnPoint()
-    const enemyType = this.pendingBossEnemyType ?? pickEnemyTypeForWave(this.wave)
-    const zombie = new Zombie(this, x, y, this.wave, enemyType)
+    const enemyType = this.pendingBossEnemyType ?? pickEnemyTypeForWave(this.wave, Math.random, this.waveModifier?.weightScale)
+    const zombie = new Zombie(this, x, y, this.wave, enemyType, this.waveModifier?.healthMultiplier ?? 1)
     this.pendingBossEnemyType = undefined
 
     if (enemyType === 'warden') {
       this.showMessage('THE WARDEN HAS ENTERED', 'danger')
       this.playSound('wardenWarn')
-      this.cameras.main.shake(160, 0.006)
+      this.cameras.main.shake(180, 0.007)
       this.vibrate(36)
+      const pulse = this.add.circle(x, y, 36, 0x4d6bff, 0.2).setStrokeStyle(4, 0x8eb4ff, 0.8).setDepth(4)
+      this.tweens.add({ targets: pulse, scale: 3.2, alpha: 0, duration: 420, onComplete: () => pulse.destroy() })
     }
 
     this.zombies.add(zombie)
@@ -3820,6 +3833,9 @@ export default class GameScene extends Phaser.Scene {
     const wasAlive = barricade.isAlive
     barricade.takeDamage(amount)
     this.playSound('barricadeHit')
+    if (attacker?.enemyType === 'brute' || attacker?.enemyType === 'warden') {
+      this.cameras.main.shake(attacker.enemyType === 'warden' ? 50 : 28, attacker.enemyType === 'warden' ? 0.003 : 0.0016)
+    }
     this.updateBarricadeHud()
 
     const entry = this.entryPoints.find((item) => item.barricade === barricade)
@@ -4035,67 +4051,39 @@ export default class GameScene extends Phaser.Scene {
 
       const slowed = zombie.suppressedUntil > this.time.now ? speedMultiplier * 0.72 : speedMultiplier
       zombie.setSpeedMultiplier(slowed)
+      zombie.setBuffed(speedMultiplier > 1.01)
     })
+
+    if (auraZombies.some((zombie) => zombie.enemyType === 'screamer')) {
+      this.playSound('screamPulse')
+    }
   }
 
-  private trySpitterAttack(zombie: Zombie, time: number) {
-    if (zombie.enemyType !== 'spitter' || zombie.spitRange <= 0) {
-      return false
-    }
-
-    const sameZone = this.isInsideBase(zombie.x, zombie.y) === this.isInsideBase(this.player.x, this.player.y)
-    const distance = Phaser.Math.Distance.Between(zombie.x, zombie.y, this.player.x, this.player.y)
-
-    if (!sameZone || distance > zombie.spitRange) {
-      return false
-    }
-
-    zombie.navState = 'chasingPlayer'
-    zombie.stopMoving()
-    zombie.rotation = Phaser.Math.Angle.Between(zombie.x, zombie.y, this.player.x, this.player.y)
-
-    if (!zombie.tryAttack(time, zombie.spitCooldownMs)) {
-      return true
-    }
-
-    this.hurtPlayer(zombie.spitDamage)
-    this.spawnSpitEffect(zombie.x, zombie.y, this.player.x, this.player.y)
-
-    return true
-  }
-
-  private spawnSpitEffect(fromX: number, fromY: number, toX: number, toY: number) {
-    const acid = this.add.circle(fromX, fromY, 5, 0x9bff59, 0.85).setDepth(5)
-
-    this.tweens.add({
-      targets: acid,
-      x: toX,
-      y: toY,
-      alpha: 0,
-      scale: 1.7,
-      duration: 160,
-      ease: 'Quad.easeOut',
-      onComplete: () => acid.destroy(),
-    })
-  }
-
-  private triggerExploderBurst(zombie: Zombie, x: number, y: number, contactTriggered: boolean) {
-    if (zombie.enemyType !== 'exploder' || zombie.explosionRadius <= 0) {
+  private updateWarden(zombie: Zombie, time: number) {
+    if (zombie.enemyType !== 'warden' || !zombie.active) {
       return
     }
 
-    const burst = this.add.circle(x, y, zombie.explosionRadius, 0xff8c1a, 0.22).setDepth(4)
-    this.tweens.add({
-      targets: burst,
-      alpha: 0,
-      scale: 1.15,
-      duration: 220,
-      ease: 'Quad.easeOut',
-      onComplete: () => burst.destroy(),
+    const nearPlayer = Phaser.Math.Distance.Between(zombie.x, zombie.y, this.player.x, this.player.y) <= 96
+    const nearDoor = this.entryPoints.some((entry) => {
+      return entry.barricade.isAlive && Phaser.Math.Distance.Between(zombie.x, zombie.y, entry.barricade.x, entry.barricade.y) <= 88
     })
 
-    if (Phaser.Math.Distance.Between(x, y, this.player.x, this.player.y) <= zombie.explosionRadius) {
-      this.hurtPlayer(contactTriggered ? zombie.explosionDamage : Math.round(zombie.explosionDamage * 0.7), true)
+    if (!nearPlayer && !nearDoor) {
+      return
+    }
+
+    if (!zombie.trySpecial(time, 3200)) {
+      return
+    }
+
+    this.playSound('wardenSlam')
+    this.cameras.main.shake(60, 0.0035)
+    const ring = this.add.circle(zombie.x, zombie.y, 20, 0x8eb4ff, 0.18).setStrokeStyle(3, 0x4d6bff, 0.8).setDepth(4)
+    this.tweens.add({ targets: ring, scale: 4.2, alpha: 0, duration: 260, onComplete: () => ring.destroy() })
+
+    if (nearPlayer) {
+      this.hurtPlayer(16, true)
     }
 
     this.entryPoints.forEach((entry) => {
@@ -4103,10 +4091,132 @@ export default class GameScene extends Phaser.Scene {
         return
       }
 
-      if (Phaser.Math.Distance.Between(x, y, entry.barricade.x, entry.barricade.y) <= zombie.explosionRadius) {
-        this.strikeBarricade(entry.barricade, Math.round(zombie.explosionDamage * 0.8))
+      if (Phaser.Math.Distance.Between(zombie.x, zombie.y, entry.barricade.x, entry.barricade.y) <= 88) {
+        this.strikeBarricade(entry.barricade, 28, zombie)
       }
     })
+  }
+
+  private trySpitterAttack(zombie: Zombie, time: number) {
+    if (zombie.enemyType !== 'spitter' || zombie.spitRange <= 0) {
+      zombie.spitWindupUntil = 0
+      return false
+    }
+
+    const sameZone = this.isInsideBase(zombie.x, zombie.y) === this.isInsideBase(this.player.x, this.player.y)
+    const distance = Phaser.Math.Distance.Between(zombie.x, zombie.y, this.player.x, this.player.y)
+    const canSee = sameZone && distance <= zombie.spitRange && this.hasClearShot(zombie.x, zombie.y, this.player.x, this.player.y)
+
+    if (zombie.spitWindupUntil > 0) {
+      zombie.stopMoving()
+      zombie.rotation = Phaser.Math.Angle.Between(zombie.x, zombie.y, this.player.x, this.player.y)
+      if (time < zombie.spitWindupUntil) {
+        return true
+      }
+
+      const targetX = this.player.x
+      const targetY = this.player.y
+      zombie.spitWindupUntil = 0
+      zombie.nextSpitAt = time + zombie.spitCooldownMs
+      this.launchAcid(zombie.x, zombie.y, targetX, targetY, zombie.spitDamage)
+      return true
+    }
+
+    if (!canSee || time < zombie.nextSpitAt) {
+      return false
+    }
+
+    zombie.navState = 'chasingPlayer'
+    zombie.stopMoving()
+    zombie.spitWindupUntil = time + 420
+    zombie.pulseMark()
+    return true
+  }
+
+  private hasClearShot(fromX: number, fromY: number, toX: number, toY: number) {
+    for (let step = 1; step <= 4; step += 1) {
+      const t = step / 5
+      const x = fromX + (toX - fromX) * t
+      const y = fromY + (toY - fromY) * t
+      const blocked = this.wallRects.some((wall) => wall.getBounds().contains(x, y))
+      if (blocked) {
+        return false
+      }
+    }
+
+    return true
+  }
+
+  private launchAcid(fromX: number, fromY: number, toX: number, toY: number, damage: number) {
+    this.playSound('acidSpit')
+    const acid = this.add.circle(fromX, fromY, 6, 0xc9ff6a, 0.9).setStrokeStyle(2, 0x9b59ff, 0.9).setDepth(5)
+    this.tweens.add({
+      targets: acid,
+      x: toX,
+      y: toY,
+      duration: 340,
+      ease: 'Linear',
+      onComplete: () => {
+        const splash = this.add.circle(acid.x, acid.y, 10, 0x9b59ff, 0.35).setDepth(4)
+        this.tweens.add({ targets: splash, alpha: 0, scale: 1.4, duration: 140, onComplete: () => splash.destroy() })
+        if (Phaser.Math.Distance.Between(acid.x, acid.y, this.player.x, this.player.y) <= 26) {
+          this.hurtPlayer(damage)
+        }
+        acid.destroy()
+      },
+    })
+  }
+
+  private triggerExploderBurst(zombie: Zombie, x: number, y: number, contactTriggered: boolean) {
+    if (zombie.enemyType !== 'exploder' || zombie.explosionRadius <= 0 || zombie.exploded) {
+      return
+    }
+
+    zombie.exploded = true
+    const blast = () => {
+      if (!this.sys.isActive()) {
+        return
+      }
+
+      const ring = this.add.circle(x, y, 12, 0xff8c1a, 0.16).setStrokeStyle(3, 0xffc857, 0.9).setDepth(4)
+      this.tweens.add({
+        targets: ring,
+        scale: zombie.explosionRadius / 12,
+        alpha: 0,
+        duration: 160,
+        onComplete: () => ring.destroy(),
+      })
+
+      if (Phaser.Math.Distance.Between(x, y, this.player.x, this.player.y) <= zombie.explosionRadius) {
+        this.hurtPlayer(contactTriggered ? zombie.explosionDamage : Math.round(zombie.explosionDamage * 0.65), true)
+      }
+
+      this.zombies.children.each((child) => {
+        const other = child as Zombie
+        if (!other.active || other === zombie) {
+          return true
+        }
+
+        if (Phaser.Math.Distance.Between(x, y, other.x, other.y) <= zombie.explosionRadius) {
+          const away = new Phaser.Math.Vector2(other.x - x, other.y - y)
+          const knock = away.lengthSq() > 0 ? away.normalize() : new Phaser.Math.Vector2(1, 0)
+          this.applyZombieDamage(other, Math.round(zombie.explosionDamage * 0.55), knock.x, knock.y, true)
+        }
+        return true
+      })
+
+      this.entryPoints.forEach((entry) => {
+        if (!entry.barricade.isAlive) {
+          return
+        }
+
+        if (Phaser.Math.Distance.Between(x, y, entry.barricade.x, entry.barricade.y) <= zombie.explosionRadius) {
+          this.strikeBarricade(entry.barricade, Math.round(zombie.explosionDamage * 0.45))
+        }
+      })
+    }
+
+    this.time.delayedCall(contactTriggered ? 140 : 0, blast)
   }
 
   private damagePlayerOnContact(zombie: Zombie, time: number) {

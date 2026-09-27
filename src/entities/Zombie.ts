@@ -24,6 +24,7 @@ export default class Zombie extends Phaser.Physics.Arcade.Sprite {
   speed = 76
   damage = 12
   scoreValue = 10
+  cashValue = 12
   barricadeDamageMultiplier = 1
   explosionDamage = 0
   explosionRadius = 0
@@ -46,6 +47,10 @@ export default class Zombie extends Phaser.Physics.Arcade.Sprite {
   lastStuckX = 0
   lastStuckY = 0
   suppressedUntil = 0
+  spitWindupUntil = 0
+  nextSpitAt = 0
+  lastSpecialAt = 0
+  exploded = false
   debugLabel?: Phaser.GameObjects.Text
   private lastAttackAt = 0
   private healthBarWidth = 32
@@ -53,8 +58,9 @@ export default class Zombie extends Phaser.Physics.Arcade.Sprite {
   private healthBarFill: Phaser.GameObjects.Rectangle
   private flashTimer?: Phaser.Time.TimerEvent
   private aura?: Phaser.GameObjects.Arc
+  private ring?: Phaser.GameObjects.Arc
 
-  constructor(scene: Phaser.Scene, x: number, y: number, wave: number, enemyType: EnemyType = 'walker') {
+  constructor(scene: Phaser.Scene, x: number, y: number, wave: number, enemyType: EnemyType = 'walker', healthScale = 1) {
     super(scene, x, y, 'zombie')
 
     scene.add.existing(this)
@@ -62,12 +68,13 @@ export default class Zombie extends Phaser.Physics.Arcade.Sprite {
 
     const config = enemyConfigs[enemyType]
     this.enemyType = enemyType
-    this.maxHealth = Math.round((this.maxHealth + wave * waveConfig.zombieHealthPerWave) * config.healthMultiplier)
+    this.maxHealth = Math.round((this.maxHealth + wave * waveConfig.zombieHealthPerWave) * config.healthMultiplier * healthScale)
     this.health = this.maxHealth
     this.baseSpeed = Math.round((this.baseSpeed + wave * waveConfig.zombieSpeedPerWave) * config.speedMultiplier)
     this.speed = this.baseSpeed
     this.damage = Math.round(this.damage * config.damageMultiplier)
     this.scoreValue = config.scoreValue
+    this.cashValue = config.cashValue
     this.barricadeDamageMultiplier = config.barricadeDamageMultiplier ?? 1
     this.explosionDamage = config.explosionDamage ?? 0
     this.explosionRadius = config.explosionRadius ?? 0
@@ -90,9 +97,35 @@ export default class Zombie extends Phaser.Physics.Arcade.Sprite {
     this.healthBarBg.setDepth(3)
     this.healthBarFill.setDepth(3)
 
-    if (isWarden && this.screamRadius > 0) {
-      this.aura = scene.add.circle(x, y, this.screamRadius, config.color, 0.08).setStrokeStyle(2, config.color, 0.45).setDepth(1)
+    if ((enemyType === 'warden' || enemyType === 'screamer') && this.screamRadius > 0) {
+      const boss = enemyType === 'warden'
+      this.aura = scene.add
+        .circle(x, y, this.screamRadius, config.color, boss ? 0.1 : 0.05)
+        .setStrokeStyle(boss ? 4 : 2, config.color, boss ? 0.7 : 0.4)
+        .setDepth(1)
+    } else if (enemyType !== 'walker') {
+      const ring = enemyType === 'brute' ? 6 : 4
+      const thickness = enemyType === 'brute' ? 4 : 2
+      this.ring = scene.add.circle(x, y, config.radius + ring, 0x000000, 0).setStrokeStyle(thickness, config.color, 0.85).setDepth(2)
     }
+  }
+
+  pulseMark() {
+    this.ring?.setScale(1.25)
+    this.scene.time.delayedCall(420, () => {
+      if (this.active) {
+        this.ring?.setScale(1)
+      }
+    })
+  }
+
+  setBuffed(buffed: boolean) {
+    if (!this.ring || this.enemyType === 'exploder') {
+      return
+    }
+
+    const color = enemyConfigs[this.enemyType].color
+    this.ring.setStrokeStyle(buffed ? 3 : 2, buffed ? 0xffd0ea : color, buffed ? 1 : 0.85)
   }
 
   chase(player: Player) {
@@ -113,6 +146,15 @@ export default class Zombie extends Phaser.Physics.Arcade.Sprite {
 
   setSpeedMultiplier(multiplier: number) {
     this.speed = this.baseSpeed * multiplier
+  }
+
+  trySpecial(time: number, cooldownMs: number) {
+    if (time - this.lastSpecialAt < cooldownMs) {
+      return false
+    }
+
+    this.lastSpecialAt = time
+    return true
   }
 
   tryAttack(time: number, cooldownMs: number) {
@@ -141,6 +183,13 @@ export default class Zombie extends Phaser.Physics.Arcade.Sprite {
   preUpdate(time: number, delta: number) {
     super.preUpdate(time, delta)
     this.aura?.setPosition(this.x, this.y)
+    this.ring?.setPosition(this.x, this.y)
+    if (this.enemyType === 'exploder' && this.ring) {
+      const urgent = this.health / this.maxHealth < 0.45
+      const pulse = 0.45 + Math.sin(time * (urgent ? 0.02 : 0.008)) * 0.35
+      this.ring.setAlpha(pulse)
+      this.ring.setScale(urgent ? 1.12 : 1)
+    }
     this.updateHealthBarPosition()
   }
 
@@ -148,6 +197,7 @@ export default class Zombie extends Phaser.Physics.Arcade.Sprite {
     this.flashTimer?.remove(false)
     this.debugLabel?.destroy()
     this.aura?.destroy()
+    this.ring?.destroy()
     this.healthBarBg.destroy()
     this.healthBarFill.destroy()
     super.destroy(fromScene)

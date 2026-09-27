@@ -20,6 +20,7 @@ export type EnemyConfig = {
   spitCooldownMs?: number
   screamRadius?: number
   screamSpeedMultiplier?: number
+  cashValue: number
 }
 
 export const enemyConfigs: Record<EnemyType, EnemyConfig> = {
@@ -33,8 +34,9 @@ export const enemyConfigs: Record<EnemyType, EnemyConfig> = {
     radius: 17,
     scoreValue: 10,
     unlockWave: 1,
-    spawnWeight: 10,
-    description: 'Standard zombie.',
+    spawnWeight: 12,
+    cashValue: 12,
+    description: 'Basic pressure.',
   },
   runner: {
     type: 'runner',
@@ -46,22 +48,24 @@ export const enemyConfigs: Record<EnemyType, EnemyConfig> = {
     radius: 15,
     scoreValue: 12,
     unlockWave: 2,
-    spawnWeight: 5,
-    description: 'Fast, fragile pressure enemy.',
+    spawnWeight: 4,
+    cashValue: 14,
+    description: 'Fast and fragile.',
   },
   brute: {
     type: 'brute',
     name: 'Brute',
     color: 0x8b5a2b,
     healthMultiplier: 2.6,
-    speedMultiplier: 0.72,
+    speedMultiplier: 0.66,
     damageMultiplier: 1.55,
     radius: 22,
     scoreValue: 25,
     unlockWave: 3,
     spawnWeight: 2,
-    barricadeDamageMultiplier: 1.8,
-    description: 'Slow tank that smashes barricades.',
+    cashValue: 20,
+    barricadeDamageMultiplier: 2.2,
+    description: 'Slow door breaker.',
   },
   spitter: {
     type: 'spitter',
@@ -73,11 +77,12 @@ export const enemyConfigs: Record<EnemyType, EnemyConfig> = {
     radius: 16,
     scoreValue: 18,
     unlockWave: 4,
-    spawnWeight: 3,
-    spitDamage: 6,
-    spitRange: 270,
-    spitCooldownMs: 1500,
-    description: 'Ranged zombie that spits acid when it has a clear zone.',
+    spawnWeight: 2,
+    cashValue: 16,
+    spitDamage: 8,
+    spitRange: 250,
+    spitCooldownMs: 1900,
+    description: 'Ranged acid. Dodge the glob.',
   },
   exploder: {
     type: 'exploder',
@@ -90,9 +95,10 @@ export const enemyConfigs: Record<EnemyType, EnemyConfig> = {
     scoreValue: 20,
     unlockWave: 5,
     spawnWeight: 2,
-    explosionDamage: 42,
-    explosionRadius: 112,
-    description: 'Bursts hard on death or contact.',
+    cashValue: 16,
+    explosionDamage: 36,
+    explosionRadius: 96,
+    description: 'Booms on contact or death, and hurts nearby zombies.',
   },
   screamer: {
     type: 'screamer',
@@ -105,9 +111,10 @@ export const enemyConfigs: Record<EnemyType, EnemyConfig> = {
     scoreValue: 22,
     unlockWave: 6,
     spawnWeight: 2,
-    screamRadius: 170,
-    screamSpeedMultiplier: 1.25,
-    description: 'Buffs nearby zombies with a speed aura.',
+    cashValue: 18,
+    screamRadius: 150,
+    screamSpeedMultiplier: 1.28,
+    description: 'Speeds up nearby zombies. Kill it first.',
   },
   warden: {
     type: 'warden',
@@ -118,6 +125,7 @@ export const enemyConfigs: Record<EnemyType, EnemyConfig> = {
     damageMultiplier: 2,
     radius: 30,
     scoreValue: 150,
+    cashValue: 60,
     unlockWave: 10,
     spawnWeight: 0,
     barricadeDamageMultiplier: 2.2,
@@ -127,13 +135,17 @@ export const enemyConfigs: Record<EnemyType, EnemyConfig> = {
   },
 }
 
-export function pickEnemyTypeForWave(wave: number, random = Math.random): EnemyType {
-  const available = Object.values(enemyConfigs).filter((enemy) => wave >= enemy.unlockWave)
-  const totalWeight = available.reduce((sum, enemy) => sum + enemy.spawnWeight, 0)
+export function pickEnemyTypeForWave(
+  wave: number,
+  random = Math.random,
+  weightScale?: Partial<Record<EnemyType, number>>,
+): EnemyType {
+  const available = Object.values(enemyConfigs).filter((enemy) => wave >= enemy.unlockWave && enemy.spawnWeight > 0)
+  const totalWeight = available.reduce((sum, enemy) => sum + enemy.spawnWeight * (weightScale?.[enemy.type] ?? 1), 0)
   let roll = random() * totalWeight
 
   for (const enemy of available) {
-    roll -= enemy.spawnWeight
+    roll -= enemy.spawnWeight * (weightScale?.[enemy.type] ?? 1)
 
     if (roll <= 0) {
       return enemy.type
