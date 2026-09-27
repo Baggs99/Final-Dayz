@@ -7,6 +7,10 @@ export type ShopItemId =
   | 'maxHealthUpgrade'
   | 'buySmg'
   | 'buyShotgun'
+  | 'buyRifle'
+  | 'buyFlamethrower'
+  | 'buyMines'
+  | 'buyTurret'
 
 export interface ShopItemConfig {
   id: ShopItemId
@@ -49,11 +53,33 @@ export const shopConfig: Record<ShopItemId, ShopItemConfig> = {
     label: 'Buy Shotgun',
     cost: 300,
   },
+  buyRifle: {
+    id: 'buyRifle',
+    label: 'Buy Rifle',
+    cost: 450,
+  },
+  buyFlamethrower: {
+    id: 'buyFlamethrower',
+    label: 'Buy Flamethrower',
+    cost: 600,
+  },
+  buyMines: {
+    id: 'buyMines',
+    label: 'Buy Mines',
+    cost: 350,
+  },
+  buyTurret: {
+    id: 'buyTurret',
+    label: 'Buy Turret',
+    cost: 700,
+  },
 }
 
 export const shopWeaponUnlocks: Partial<Record<ShopItemId, WeaponId>> = {
   buySmg: 'smg',
   buyShotgun: 'shotgun',
+  buyRifle: 'rifle',
+  buyFlamethrower: 'flamethrower',
 }
 
 export const shopUpgradeConfig = {

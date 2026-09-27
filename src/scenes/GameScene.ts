@@ -20,7 +20,7 @@ import { persistHighScore, syncHighScoresFromServer } from '../network/highScore
 import { getPerk, rollPerkChoices, PERK_WAVE_INTERVAL, type PerkConfig, type PerkId } from '../config/perks'
 import { shopConfig, shopUpgradeConfig, shopWeaponUnlocks, type ShopItemId } from '../config/shop'
 import { waveConfig } from '../config/waves'
-import { defaultWeaponId, type WeaponConfig, type WeaponId, weapons } from '../config/weapons'
+import { defaultWeaponId, toolConfig, type WeaponConfig, type WeaponId, weaponCycle, weapons } from '../config/weapons'
 import { GameAudio, type SoundId } from '../audio/gameAudio'
 import Barricade from '../entities/Barricade'
 import Bullet from '../entities/Bullet'
@@ -54,8 +54,27 @@ type WasdKeys = {
   ONE: Phaser.Input.Keyboard.Key
   TWO: Phaser.Input.Keyboard.Key
   THREE: Phaser.Input.Keyboard.Key
+  FOUR: Phaser.Input.Keyboard.Key
+  Q: Phaser.Input.Keyboard.Key
+  T: Phaser.Input.Keyboard.Key
+  SPACE: Phaser.Input.Keyboard.Key
   E: Phaser.Input.Keyboard.Key
   ENTER: Phaser.Input.Keyboard.Key
+}
+
+type PlacedMine = {
+  x: number
+  y: number
+  armedAt: number
+  sprite: Phaser.GameObjects.Arc
+}
+
+type PlacedTurret = {
+  x: number
+  y: number
+  lastShotAt: number
+  base: Phaser.GameObjects.Arc
+  aim: Phaser.GameObjects.Rectangle
 }
 
 type EntryPointId = 'top' | 'bottom' | 'left' | 'right'
@@ -170,6 +189,16 @@ export default class GameScene extends Phaser.Scene {
   private cash = 0
   private currentWeaponId: WeaponId = defaultWeaponId
   private ownedWeapons = new Set<WeaponId>([defaultWeaponId])
+  private ownsMines = false
+  private ownsTurret = false
+  private mines: PlacedMine[] = []
+  private turrets: PlacedTurret[] = []
+  private lastMeleeAt = -10000
+  private shopPage = 0
+  private touchMeleeButton?: Phaser.GameObjects.Text
+  private touchMineButton?: Phaser.GameObjects.Text
+  private touchTurretButton?: Phaser.GameObjects.Text
+  private toolText!: Phaser.GameObjects.Text
   private damageBonus = 0
   private damageUpgradeLevel = 0
   private maxHealthUpgradeLevel = 0
@@ -250,7 +279,7 @@ export default class GameScene extends Phaser.Scene {
 
     this.player = new Player(this, this.scale.width / 2, this.scale.height / 2)
     this.lastAimWorldPoint.set(this.player.x + 1, this.player.y)
-    this.keys = this.input.keyboard!.addKeys('W,A,S,D,ONE,TWO,THREE,E,ENTER') as WasdKeys
+    this.keys = this.input.keyboard!.addKeys('W,A,S,D,ONE,TWO,THREE,FOUR,Q,T,SPACE,E,ENTER') as WasdKeys
 
     this.createBaseLayout()
     this.rebuildNavigationGrid()
@@ -313,6 +342,10 @@ export default class GameScene extends Phaser.Scene {
 
     if (!this.isIntermission && this.isFiringInputActive()) {
       this.tryShoot(time)
+    }
+
+    if (this.gameMode === 'singlePlayer' && !this.isIntermission) {
+      this.updatePlayerTools(time)
     }
 
     this.clearNavigationPathDebug()
@@ -503,6 +536,7 @@ export default class GameScene extends Phaser.Scene {
     this.ownedWeaponsText = this.add.text(20, 166, this.getOwnedWeaponsLabel(), this.smallHudTextStyle())
     this.barricadeText = this.add.text(20, 190, this.getBarricadeStatusLabel(), this.smallHudTextStyle())
     this.perkText = this.add.text(20, 214, '', this.smallHudTextStyle())
+    this.toolText = this.add.text(20, 238, '', this.smallHudTextStyle())
     this.multiplayerText = this.add.text(20, 214, '', this.smallHudTextStyle())
     this.messageText = this.add.text(this.scale.width / 2, 34, '', {
       align: 'center',
@@ -619,6 +653,9 @@ export default class GameScene extends Phaser.Scene {
     this.firePad = this.createTouchPad('FIRE', 0x3b1515, 0xff6b6b)
     this.touchWeaponButton = this.createTouchActionButton('Weapon', () => this.cycleOwnedWeapon())
     this.touchRepairButton = this.createTouchActionButton('Repair', () => this.tryRepair())
+    this.touchMeleeButton = this.createTouchActionButton('Melee', () => this.tryMelee(this.time.now))
+    this.touchMineButton = this.createTouchActionButton('Mine', () => this.tryPlaceMine(this.time.now))
+    this.touchTurretButton = this.createTouchActionButton('Turret', () => this.tryPlaceTurret(this.time.now))
     this.layoutTouchControls(this.scale.gameSize)
     this.setTouchActionButtonsVisible(false)
     this.layoutHud()
@@ -759,8 +796,11 @@ export default class GameScene extends Phaser.Scene {
 
     const fireX = this.firePad.centerX
     const fireTop = this.firePad.centerY - radius - 36
-    this.touchWeaponButton?.setPosition(fireX, fireTop - 56)
     this.touchRepairButton?.setPosition(fireX, fireTop)
+    this.touchWeaponButton?.setPosition(fireX, fireTop - 52)
+    this.touchMeleeButton?.setPosition(fireX, fireTop - 104)
+    this.touchMineButton?.setPosition(fireX, fireTop - 156)
+    this.touchTurretButton?.setPosition(fireX, fireTop - 208)
   }
 
   private placeTouchPad(pad: TouchPad, x: number, y: number) {
@@ -1762,6 +1802,9 @@ export default class GameScene extends Phaser.Scene {
     const showRepair = showWeapon && this.gameMode === 'singlePlayer'
     this.touchWeaponButton?.setVisible(showWeapon)
     this.touchRepairButton?.setVisible(showRepair)
+    this.touchMeleeButton?.setVisible(showWeapon)
+    this.touchMineButton?.setVisible(showWeapon && this.ownsMines)
+    this.touchTurretButton?.setVisible(showWeapon && this.ownsTurret)
     this.movePad?.base.setVisible(showWeapon)
     this.movePad?.knob.setVisible(showWeapon)
     this.movePad?.label.setVisible(showWeapon)
@@ -1786,6 +1829,7 @@ export default class GameScene extends Phaser.Scene {
     this.healthText.setPosition(left + 8, top + 3)
     this.healthText.setFontSize(narrow ? 12 : 14)
 
+    const hideCombatHud = Boolean(this.shopOverlay || this.perkOverlay || this.startOverlay || this.gameOverOverlay)
     const line = narrow ? 22 : 28
     this.waveText.setPosition(left, top + 30)
     this.scoreText.setPosition(left, top + 30 + line)
@@ -1795,12 +1839,14 @@ export default class GameScene extends Phaser.Scene {
     this.barricadeText.setPosition(left, top + 30 + line * 5)
     this.perkText.setPosition(left, top + 30 + line * 6)
     this.perkText.setWordWrapWidth(narrow ? 160 : 260)
-    this.multiplayerText.setPosition(left, top + 30 + line * 7)
+    this.toolText.setPosition(left, top + 30 + line * 7)
+    this.multiplayerText.setPosition(left, top + 30 + line * 8)
+    this.toolText.setText(this.formatToolHud())
+    this.toolText.setVisible(!hideCombatHud && !narrow && (this.ownsMines || this.ownsTurret))
     this.waveText.setFontSize(narrow ? 14 : 20)
     this.scoreText.setFontSize(narrow ? 14 : 20)
     this.cashText.setFontSize(narrow ? 14 : 20)
     this.weaponText.setFontSize(narrow ? 14 : 20)
-    const hideCombatHud = Boolean(this.shopOverlay || this.perkOverlay || this.startOverlay || this.gameOverOverlay)
     this.healthBarBg.setVisible(!hideCombatHud)
     this.healthFill.setVisible(!hideCombatHud)
     this.healthText.setVisible(!hideCombatHud)
@@ -2097,6 +2143,319 @@ export default class GameScene extends Phaser.Scene {
     if (Phaser.Input.Keyboard.JustDown(this.keys.THREE)) {
       this.setWeapon('shotgun')
     }
+
+    if (Phaser.Input.Keyboard.JustDown(this.keys.FOUR)) {
+      this.setWeapon('rifle')
+    }
+  }
+
+  private updatePlayerTools(time: number) {
+    if (Phaser.Input.Keyboard.JustDown(this.keys.Q)) {
+      this.tryPlaceMine(time)
+    }
+
+    if (Phaser.Input.Keyboard.JustDown(this.keys.T)) {
+      this.tryPlaceTurret(time)
+    }
+
+    if (Phaser.Input.Keyboard.JustDown(this.keys.SPACE)) {
+      this.tryMelee(time)
+    }
+
+    this.updateMines(time)
+    this.updateTurrets(time)
+    this.refreshMeleeButton(time)
+  }
+
+  private formatToolHud() {
+    const parts: string[] = []
+    if (this.ownsMines) {
+      parts.push(`Mines ${this.mines.length}/${toolConfig.mineMax}`)
+    }
+    if (this.ownsTurret) {
+      parts.push(`Turrets ${this.turrets.length}/${toolConfig.turretMax}`)
+    }
+    return parts.join('  ')
+  }
+
+  private refreshMeleeButton(time: number) {
+    if (!this.touchMeleeButton) {
+      return
+    }
+
+    const readyIn = toolConfig.meleeCooldownMs - (time - this.lastMeleeAt)
+    this.touchMeleeButton.setText(readyIn > 0 ? `Melee ${(readyIn / 1000).toFixed(1)}` : 'Melee')
+  }
+
+  private tryPlaceMine(time: number) {
+    if (!this.ownsMines || this.isIntermission || this.isGameOver) {
+      return
+    }
+
+    if (this.mines.length >= toolConfig.mineMax) {
+      this.showMessage('Max mines placed', 'warning')
+      return
+    }
+
+    if (!this.spendCash(toolConfig.minePlaceCost)) {
+      return
+    }
+
+    const sprite = this.add.circle(this.player.x, this.player.y, 8, 0xffc857, 0.9).setStrokeStyle(2, 0xff8c1a).setDepth(4)
+    this.mines.push({ x: this.player.x, y: this.player.y, armedAt: time + toolConfig.mineArmMs, sprite })
+    this.playSound('minePlace')
+    this.showMessage('Mine placed', 'info')
+  }
+
+  private tryPlaceTurret(time: number) {
+    if (!this.ownsTurret || this.isIntermission || this.isGameOver) {
+      return
+    }
+
+    if (this.turrets.length >= toolConfig.turretMax) {
+      this.showMessage('Max turrets placed', 'warning')
+      return
+    }
+
+    if (!this.spendCash(toolConfig.turretPlaceCost)) {
+      return
+    }
+
+    const base = this.add.circle(this.player.x, this.player.y, 12, 0x8fd3ff, 0.95).setStrokeStyle(2, 0xd7f3ff).setDepth(4)
+    const aim = this.add.rectangle(this.player.x + 16, this.player.y, 16, 3, 0xd7f3ff).setDepth(4)
+    this.turrets.push({ x: this.player.x, y: this.player.y, lastShotAt: time, base, aim })
+    this.playSound('turretPlace')
+    this.showMessage('Turret placed', 'info')
+  }
+
+  private tryMelee(time: number) {
+    if (this.isIntermission || this.isGameOver || time - this.lastMeleeAt < toolConfig.meleeCooldownMs) {
+      return
+    }
+
+    this.lastMeleeAt = time
+    this.playSound('meleeSwing')
+    this.vibrate(16)
+    const aim = new Phaser.Math.Vector2(this.lastAimWorldPoint.x - this.player.x, this.lastAimWorldPoint.y - this.player.y)
+    if (aim.lengthSq() === 0) {
+      aim.set(Math.cos(this.player.rotation), Math.sin(this.player.rotation))
+    }
+    aim.normalize()
+    const arc = this.add.circle(this.player.x + aim.x * 28, this.player.y + aim.y * 28, toolConfig.meleeRange * 0.55, 0xd7f3ff, 0.28).setDepth(5)
+    this.tweens.add({
+      targets: arc,
+      alpha: 0,
+      scale: 1.2,
+      duration: 140,
+      onComplete: () => arc.destroy(),
+    })
+
+    this.zombies.children.each((child) => {
+      const zombie = child as Zombie
+      if (!zombie.active) {
+        return true
+      }
+
+      const offset = new Phaser.Math.Vector2(zombie.x - this.player.x, zombie.y - this.player.y)
+      if (offset.length() > toolConfig.meleeRange) {
+        return true
+      }
+
+      const away = offset.lengthSq() > 0 ? offset.clone().normalize() : aim
+      this.applyZombieDamage(zombie, this.getMeleeDamage(), away.x * 2.4, away.y * 2.4, false)
+      return true
+    })
+  }
+
+  private getMeleeDamage() {
+    let damage = toolConfig.meleeDamage
+    if (this.hasPerk('lastStand') && this.player.health / this.player.maxHealth < 0.3) {
+      damage = Math.round(damage * 1.25)
+    }
+    return damage
+  }
+
+  private updateMines(time: number) {
+    const pending: PlacedMine[] = []
+    this.mines.forEach((mine) => {
+      if (time < mine.armedAt) {
+        pending.push(mine)
+        return
+      }
+
+      const triggered = this.zombies.children.entries.some((child) => {
+        const zombie = child as Zombie
+        return zombie.active && Phaser.Math.Distance.Between(zombie.x, zombie.y, mine.x, mine.y) <= toolConfig.mineTriggerRadius
+      })
+
+      if (!triggered) {
+        pending.push(mine)
+        return
+      }
+
+      this.detonateMine(mine)
+    })
+    this.mines = pending
+  }
+
+  private detonateMine(mine: PlacedMine) {
+    mine.sprite.destroy()
+    this.playSound('mineBoom')
+    this.cameras.main.shake(70, 0.004)
+    const burst = this.add.circle(mine.x, mine.y, toolConfig.mineExplosionRadius, 0xff8c1a, 0.28).setDepth(4)
+    this.tweens.add({
+      targets: burst,
+      alpha: 0,
+      scale: 1.15,
+      duration: 180,
+      onComplete: () => burst.destroy(),
+    })
+
+    this.zombies.children.each((child) => {
+      const zombie = child as Zombie
+      if (!zombie.active) {
+        return true
+      }
+
+      const offset = new Phaser.Math.Vector2(zombie.x - mine.x, zombie.y - mine.y)
+      if (offset.length() > toolConfig.mineExplosionRadius) {
+        return true
+      }
+
+      const away = offset.lengthSq() > 0 ? offset.clone().normalize() : new Phaser.Math.Vector2(1, 0)
+      this.applyZombieDamage(zombie, toolConfig.mineDamage, away.x, away.y, false)
+      return true
+    })
+  }
+
+  private updateTurrets(time: number) {
+    this.turrets.forEach((turret) => {
+      const target = this.nearestZombie(turret.x, turret.y, toolConfig.turretRange)
+      if (!target) {
+        turret.aim.setPosition(turret.x + 16, turret.y)
+        return
+      }
+
+      const angle = Phaser.Math.Angle.Between(turret.x, turret.y, target.x, target.y)
+      turret.aim.setPosition(turret.x + Math.cos(angle) * 18, turret.y + Math.sin(angle) * 18)
+      turret.aim.setRotation(angle)
+      if (time - turret.lastShotAt < toolConfig.turretFireRateMs) {
+        return
+      }
+
+      turret.lastShotAt = time
+      this.playSound('turretShot')
+      const direction = new Phaser.Math.Vector2(Math.cos(angle), Math.sin(angle))
+      const bullet = new Bullet(
+        this,
+        turret.x + direction.x * 16,
+        turret.y + direction.y * 16,
+        toolConfig.turretDamage + Math.floor(this.damageBonus / 2),
+        1400,
+        'turret',
+      )
+      this.bullets.add(bullet)
+      bullet.launch(direction.x, direction.y)
+    })
+  }
+
+  private nearestZombie(x: number, y: number, range: number) {
+    let closest: Zombie | undefined
+    let closestDistance = range
+    this.zombies.children.each((child) => {
+      const zombie = child as Zombie
+      if (!zombie.active) {
+        return true
+      }
+
+      const distance = Phaser.Math.Distance.Between(x, y, zombie.x, zombie.y)
+      if (distance <= closestDistance) {
+        closest = zombie
+        closestDistance = distance
+      }
+      return true
+    })
+    return closest
+  }
+
+  private tickFlamethrower(_time: number, angle: number) {
+    this.playSound('flameTick')
+    const range = this.currentWeapon.range ?? 150
+    const halfCone = Phaser.Math.DegToRad(this.currentWeapon.spreadDegrees / 2)
+    for (let index = 0; index < 4; index += 1) {
+      const puffAngle = angle + Phaser.Math.FloatBetween(-halfCone, halfCone)
+      const distance = Phaser.Math.Between(24, range)
+      const puff = this.add.circle(
+        this.player.x + Math.cos(puffAngle) * distance,
+        this.player.y + Math.sin(puffAngle) * distance,
+        Phaser.Math.Between(4, 8),
+        index % 2 === 0 ? 0xff8c1a : 0xffe08a,
+        0.7,
+      ).setDepth(5)
+      this.tweens.add({
+        targets: puff,
+        alpha: 0,
+        scale: 0.4,
+        duration: 120,
+        onComplete: () => puff.destroy(),
+      })
+    }
+
+    const damage = this.getShotDamage(this.currentWeapon)
+    this.zombies.children.each((child) => {
+      const zombie = child as Zombie
+      if (!zombie.active) {
+        return true
+      }
+
+      const offset = new Phaser.Math.Vector2(zombie.x - this.player.x, zombie.y - this.player.y)
+      const distance = offset.length()
+      if (distance > range || distance < 8) {
+        return true
+      }
+
+      const aim = Math.atan2(offset.y, offset.x)
+      const delta = Math.atan2(Math.sin(aim - angle), Math.cos(aim - angle))
+      if (Math.abs(delta) > halfCone) {
+        return true
+      }
+
+      const knock = offset.normalize()
+      this.applyZombieDamage(zombie, damage, knock.x * 0.15, knock.y * 0.15, true)
+      return true
+    })
+  }
+
+  private applyZombieDamage(zombie: Zombie, damage: number, knockX: number, knockY: number, quietHit: boolean) {
+    const deathX = zombie.x
+    const deathY = zombie.y
+    if (!quietHit) {
+      this.spawnHitSpark(deathX, deathY, 0xfff2a8, 3, 16)
+      this.playSound('zombieHit')
+    }
+
+    if (!zombie.takeDamage(damage, knockX, knockY)) {
+      return
+    }
+
+    this.score += zombie.scoreValue
+    this.zombiesKilled += 1
+    this.updateCash(waveConfig.cashPerKill)
+    this.scoreText.setText(`Score ${this.score}`)
+    this.notePersonalBestBeaten()
+    const deathColor = zombie.enemyType === 'exploder' ? 0xff8c1a : enemyConfigs[zombie.enemyType].color
+    const deathScale = zombie.enemyType === 'warden' ? 1.8 : 1
+    this.spawnZombieDeathEffect(deathX, deathY, deathColor, deathScale)
+    this.triggerExploderBurst(zombie, deathX, deathY, false)
+    this.showFloatingScore(deathX, deathY, zombie.scoreValue, zombie.enemyType === 'warden' ? 28 : 18)
+    if (zombie.enemyType === 'warden') {
+      this.playSound('wardenDeath')
+      this.showWaveBanner('THE WARDEN IS DOWN', '#8eb4ff')
+      this.showMessage(`THE WARDEN IS DOWN  +${zombie.scoreValue}`, 'money')
+      this.cameras.main.shake(150, 0.007)
+    } else {
+      this.playSound('zombieDeath')
+    }
   }
 
   private setWeapon(weaponId: WeaponId) {
@@ -2112,7 +2471,7 @@ export default class GameScene extends Phaser.Scene {
   }
 
   private cycleOwnedWeapon() {
-    const owned = (Object.keys(weapons) as WeaponId[]).filter((weaponId) => this.ownedWeapons.has(weaponId))
+    const owned = weaponCycle.filter((weaponId) => this.ownedWeapons.has(weaponId))
     const currentIndex = owned.indexOf(this.currentWeaponId)
     const nextWeapon = owned[(currentIndex + 1 + owned.length) % owned.length]
 
@@ -2196,12 +2555,21 @@ export default class GameScene extends Phaser.Scene {
     const firstShotOffset = pelletCount > 1 ? -spreadRadians / 2 : 0
     const angleStep = pelletCount > 1 ? spreadRadians / (pelletCount - 1) : 0
 
-    const muzzleRadius = weapon.id === 'shotgun' ? 14 : weapon.id === 'smg' ? 5 : 8
-    this.createMuzzleFlash(this.player.x, this.player.y, baseAngle, weapon.id === 'shotgun' ? 0xffe08a : 0xfff2a8, muzzleRadius)
-    this.playSound(weapon.id === 'shotgun' ? 'shotgunShot' : weapon.id === 'smg' ? 'smgShot' : 'pistolShot')
+    if (weapon.kind === 'cone') {
+      this.tickFlamethrower(time, baseAngle)
+      return
+    }
+
+    const muzzleRadius = weapon.id === 'shotgun' ? 14 : weapon.id === 'rifle' ? 5 : weapon.id === 'smg' ? 5 : 8
+    const muzzleColor = weapon.id === 'shotgun' ? 0xffe08a : weapon.id === 'rifle' ? 0xfff6c8 : 0xfff2a8
+    this.createMuzzleFlash(this.player.x, this.player.y, baseAngle, muzzleColor, muzzleRadius)
+    this.playSound(this.shotSound(weapon.id))
     if (weapon.id === 'shotgun') {
       this.cameras.main.shake(45, 0.0022)
       this.vibrate(14)
+    } else if (weapon.id === 'rifle') {
+      this.cameras.main.shake(30, 0.0016)
+      this.vibrate(10)
     } else if (weapon.id === 'pistol') {
       this.vibrate(8)
     }
@@ -2217,7 +2585,7 @@ export default class GameScene extends Phaser.Scene {
       const shotDirection = new Phaser.Math.Vector2(Math.cos(shotAngle), Math.sin(shotAngle))
       const muzzleX = this.player.x + shotDirection.x * spawnOffset
       const muzzleY = this.player.y + shotDirection.y * spawnOffset
-      const bullet = new Bullet(this, muzzleX, muzzleY, shotDamage, weapon.bulletSpeed, weapon.id)
+      const bullet = new Bullet(this, muzzleX, muzzleY, shotDamage, weapon.bulletSpeed, weapon.id, weapon.pierce ?? 0)
 
       this.bullets.add(bullet)
       bullet.launch(shotDirection.x, shotDirection.y)
@@ -2467,19 +2835,37 @@ export default class GameScene extends Phaser.Scene {
       })
       .setOrigin(0.5)
     const nextWave = this.wave + 1
-    const continueButton = this.createShopButton(0, compact ? 286 : 292, `Start Wave ${nextWave}`, () => this.handleNextRoundClick(), undefined, '#2ecc71', '#101316')
+    const continueButton = this.createShopButton(0, compact ? 286 : 250, `Start Wave ${nextWave}`, () => this.handleNextRoundClick(), undefined, '#2ecc71', '#101316')
     const items: Phaser.GameObjects.GameObject[] = [panel, title, bonus, this.shopStatusText, continueButton]
-    const shopEntries: ShopItemId[] = ['healPlayer', 'repairAll', 'damageUpgrade', 'maxHealthUpgrade', 'buySmg', 'buyShotgun']
+    const upgradeItems: ShopItemId[] = ['healPlayer', 'repairAll', 'damageUpgrade', 'maxHealthUpgrade']
+    const gearItems: ShopItemId[] = ['buySmg', 'buyShotgun', 'buyRifle', 'buyFlamethrower', 'buyMines', 'buyTurret']
+    const shopEntries = compact ? (this.shopPage === 0 ? upgradeItems : gearItems) : [...upgradeItems, ...gearItems]
     this.shopLabels.clear()
 
+    if (compact) {
+      items.push(
+        this.createShopButton(0, 214, this.shopPage === 0 ? 'Weapons & Tools' : 'Upgrades', () => {
+          this.shopPage = this.shopPage === 0 ? 1 : 0
+          this.showShop()
+        }),
+      )
+    }
+
     shopEntries.forEach((itemId, index) => {
-      const y = (compact ? -108 : -112) + index * (compact ? 52 : 54)
+      const columns = compact ? 1 : 2
+      const column = index % columns
+      const row = Math.floor(index / columns)
+      const x = compact ? 0 : column === 0 ? -155 : 155
+      const y = (compact ? -108 : -130) + row * (compact ? 50 : 58)
       const button = this.createShopButton(
-        0,
+        x,
         y,
         this.formatShopItemLabel(itemId),
         () => this.handleShopItemClick(itemId),
         shopConfig[itemId].repeatable ? () => this.buyMaxShopItem(itemId) : undefined,
+        '#20262b',
+        '#ffffff',
+        compact ? 320 : 280,
       )
       this.shopLabels.set(itemId, button)
       items.push(button)
@@ -2514,6 +2900,7 @@ export default class GameScene extends Phaser.Scene {
     onHold?: () => void,
     backgroundColor = '#20262b',
     color = '#ffffff',
+    width?: number,
   ) {
     const compact = this.isCompactMenu()
     const button = this.add
@@ -2521,7 +2908,7 @@ export default class GameScene extends Phaser.Scene {
         align: 'center',
         backgroundColor,
         color,
-        fixedWidth: compact ? 320 : 420,
+        fixedWidth: width ?? (compact ? 320 : 420),
         fontFamily: 'Arial',
         fontSize: compact ? '16px' : '18px',
         padding: { x: 12, y: 12 },
@@ -2612,6 +2999,13 @@ export default class GameScene extends Phaser.Scene {
       return false
     }
 
+    if ((itemId === 'buyMines' && this.ownsMines) || (itemId === 'buyTurret' && this.ownsTurret)) {
+      if (!quiet) {
+        this.denyPurchase('Already owned')
+      }
+      return false
+    }
+
     if (itemId === 'healPlayer' && this.player.health >= this.player.maxHealth) {
       if (!quiet) {
         this.denyPurchase('Already full HP')
@@ -2689,6 +3083,26 @@ export default class GameScene extends Phaser.Scene {
       return true
     }
 
+    if (itemId === 'buyMines') {
+      this.ownsMines = true
+      if (!quiet) {
+        this.showMessage('Mines unlocked', 'money')
+      }
+      this.setTouchActionButtonsVisible(true)
+      this.refreshShopButtons()
+      return true
+    }
+
+    if (itemId === 'buyTurret') {
+      this.ownsTurret = true
+      if (!quiet) {
+        this.showMessage('Turret unlocked', 'money')
+      }
+      this.setTouchActionButtonsVisible(true)
+      this.refreshShopButtons()
+      return true
+    }
+
     if (weaponUnlock) {
       this.ownedWeapons.add(weaponUnlock)
       this.ownedWeaponsText.setText(this.getOwnedWeaponsLabel())
@@ -2746,12 +3160,36 @@ export default class GameScene extends Phaser.Scene {
       return this.ownedWeapons.has('smg') ? 'SMG — Owned' : `SMG — $${shopConfig.buySmg.cost}`
     }
 
-    return this.ownedWeapons.has('shotgun') ? 'Shotgun — Owned' : `Shotgun — $${shopConfig.buyShotgun.cost}`
+    if (itemId === 'buyShotgun') {
+      return this.ownedWeapons.has('shotgun') ? 'Shotgun — Owned' : `Shotgun — $${shopConfig.buyShotgun.cost}`
+    }
+
+    if (itemId === 'buyRifle') {
+      return this.ownedWeapons.has('rifle') ? 'Rifle — Owned' : `Rifle — $${shopConfig.buyRifle.cost}`
+    }
+
+    if (itemId === 'buyFlamethrower') {
+      return this.ownedWeapons.has('flamethrower') ? 'Flamethrower — Owned' : `Flamethrower — $${shopConfig.buyFlamethrower.cost}`
+    }
+
+    if (itemId === 'buyMines') {
+      return this.ownsMines ? 'Mines — Owned' : `Mines — $${shopConfig.buyMines.cost}`
+    }
+
+    return this.ownsTurret ? 'Turret — Owned' : `Turret — $${shopConfig.buyTurret.cost}`
   }
 
   private canPurchaseShopItem(itemId: ShopItemId) {
     const weaponUnlock = shopWeaponUnlocks[itemId]
     if (weaponUnlock && this.ownedWeapons.has(weaponUnlock)) {
+      return false
+    }
+
+    if (itemId === 'buyMines' && this.ownsMines) {
+      return false
+    }
+
+    if (itemId === 'buyTurret' && this.ownsTurret) {
       return false
     }
 
@@ -2879,7 +3317,8 @@ export default class GameScene extends Phaser.Scene {
   }
 
   private getShotDamage(weapon: WeaponConfig) {
-    let damage = weapon.damage + this.damageBonus
+    const bonus = weapon.kind === 'cone' ? Math.floor(this.damageBonus / 2) : this.damageBonus
+    let damage = weapon.damage + bonus
     if (weapon.id === 'pistol' && this.hasPerk('deadeye')) {
       damage = Math.round(damage * 1.2)
     }
@@ -2889,6 +3328,14 @@ export default class GameScene extends Phaser.Scene {
     }
 
     return damage
+  }
+
+  private shotSound(weaponId: WeaponId): SoundId {
+    if (weaponId === 'shotgun') return 'shotgunShot'
+    if (weaponId === 'smg') return 'smgShot'
+    if (weaponId === 'rifle') return 'rifleShot'
+    if (weaponId === 'flamethrower') return 'flameTick'
+    return 'pistolShot'
   }
 
   private getPelletCount(weapon: WeaponConfig) {
@@ -3455,39 +3902,27 @@ export default class GameScene extends Phaser.Scene {
   ) {
     const bullet = bulletObject as Bullet
     const zombie = zombieObject as Zombie
+    if (!bullet.active || bullet.struck.has(zombie)) {
+      return
+    }
+
+    bullet.struck.add(zombie)
     const bulletBody = bullet.body as Phaser.Physics.Arcade.Body
     const bulletDirection = new Phaser.Math.Vector2(bulletBody.velocity.x, bulletBody.velocity.y).normalize()
-    const deathX = zombie.x
-    const deathY = zombie.y
-
-    bullet.destroy()
     if (bullet.weaponId === 'smg' && this.hasPerk('suppressiveFire')) {
       zombie.suppressedUntil = this.time.now + 500
     }
-    const shotgunHit = bullet.weaponId === 'shotgun'
-    this.spawnHitSpark(deathX, deathY, 0xfff2a8, shotgunHit ? 5 : 3, shotgunHit ? 22 : 14)
-    this.playSound('zombieHit')
 
-    if (zombie.takeDamage(bullet.damage, bulletDirection.x, bulletDirection.y)) {
-      this.score += zombie.scoreValue
-      this.zombiesKilled += 1
-      this.updateCash(waveConfig.cashPerKill)
-      this.scoreText.setText(`Score ${this.score}`)
-      this.notePersonalBestBeaten()
-      const deathColor = zombie.enemyType === 'exploder' ? 0xff8c1a : enemyConfigs[zombie.enemyType].color
-      const deathScale = zombie.enemyType === 'warden' ? 1.8 : 1
-      this.spawnZombieDeathEffect(deathX, deathY, deathColor, deathScale)
-      this.triggerExploderBurst(zombie, deathX, deathY, false)
-      this.showFloatingScore(deathX, deathY, zombie.scoreValue, zombie.enemyType === 'warden' ? 28 : 18)
-      if (zombie.enemyType === 'warden') {
-        this.playSound('wardenDeath')
-        this.showWaveBanner('THE WARDEN IS DOWN', '#8eb4ff')
-        this.showMessage(`THE WARDEN IS DOWN  +${zombie.scoreValue}`, 'money')
-        this.cameras.main.shake(150, 0.007)
-      } else {
-        this.playSound('zombieDeath')
-      }
+    const shotgunHit = bullet.weaponId === 'shotgun'
+    this.spawnHitSpark(zombie.x, zombie.y, bullet.weaponId === 'rifle' ? 0xfff6c8 : 0xfff2a8, shotgunHit ? 5 : 3, shotgunHit ? 22 : 14)
+    this.playSound('zombieHit')
+    this.applyZombieDamage(zombie, bullet.damage, bulletDirection.x, bulletDirection.y, true)
+    if (bullet.pierce > 0) {
+      bullet.pierce -= 1
+      return
     }
+
+    bullet.destroy()
   }
 
   private spawnZombieDeathEffect(x: number, y: number, color = 0x8b1e1e, scale = 1) {

@@ -4,11 +4,21 @@ import type { WeaponId } from '../config/weapons'
 export default class Bullet extends Phaser.Physics.Arcade.Sprite {
   damage: number
   speed: number
-  weaponId: WeaponId
+  weaponId: WeaponId | 'turret'
+  pierce = 0
+  struck = new Set<Phaser.GameObjects.GameObject>()
   lifespan = 1600
   private bornAt = 0
 
-  constructor(scene: Phaser.Scene, x: number, y: number, damage: number, speed: number, weaponId: WeaponId = 'pistol') {
+  constructor(
+    scene: Phaser.Scene,
+    x: number,
+    y: number,
+    damage: number,
+    speed: number,
+    weaponId: WeaponId | 'turret' = 'pistol',
+    pierce = 0,
+  ) {
     super(scene, x, y, 'bullet')
 
     scene.add.existing(this)
@@ -17,8 +27,12 @@ export default class Bullet extends Phaser.Physics.Arcade.Sprite {
     this.damage = damage
     this.speed = speed
     this.weaponId = weaponId
+    this.pierce = pierce
     this.bornAt = scene.time.now
-    this.setCircle(4)
+    this.setCircle(weaponId === 'rifle' ? 3 : 4)
+    if (weaponId === 'rifle') {
+      this.setDisplaySize(18, 4)
+    }
   }
 
   launch(directionX: number, directionY: number) {
