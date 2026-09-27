@@ -55,6 +55,7 @@ type WasdKeys = {
   TWO: Phaser.Input.Keyboard.Key
   THREE: Phaser.Input.Keyboard.Key
   FOUR: Phaser.Input.Keyboard.Key
+  FIVE: Phaser.Input.Keyboard.Key
   Q: Phaser.Input.Keyboard.Key
   T: Phaser.Input.Keyboard.Key
   SPACE: Phaser.Input.Keyboard.Key
@@ -140,6 +141,7 @@ export default class GameScene extends Phaser.Scene {
   private cashText!: Phaser.GameObjects.Text
   private weaponText!: Phaser.GameObjects.Text
   private ownedWeaponsText!: Phaser.GameObjects.Text
+  private controlsHintText!: Phaser.GameObjects.Text
   private barricadeText!: Phaser.GameObjects.Text
   private perkText!: Phaser.GameObjects.Text
   private multiplayerText!: Phaser.GameObjects.Text
@@ -283,7 +285,7 @@ export default class GameScene extends Phaser.Scene {
 
     this.player = new Player(this, this.scale.width / 2, this.scale.height / 2)
     this.lastAimWorldPoint.set(this.player.x + 1, this.player.y)
-    this.keys = this.input.keyboard!.addKeys('W,A,S,D,ONE,TWO,THREE,FOUR,Q,T,SPACE,E,ENTER') as WasdKeys
+    this.keys = this.input.keyboard!.addKeys('W,A,S,D,ONE,TWO,THREE,FOUR,FIVE,Q,T,SPACE,E,ENTER') as WasdKeys
 
     this.createBaseLayout()
     this.rebuildNavigationGrid()
@@ -539,6 +541,13 @@ export default class GameScene extends Phaser.Scene {
     this.cashText = this.add.text(20, 110, 'Cash $0', this.hudTextStyle())
     this.weaponText = this.add.text(20, 138, `Weapon ${this.currentWeapon.name}`, this.hudTextStyle())
     this.ownedWeaponsText = this.add.text(20, 166, this.getOwnedWeaponsLabel(), this.smallHudTextStyle())
+    this.controlsHintText = this.add.text(20, 190, '', {
+      color: '#c5d0c5',
+      fontFamily: 'Arial',
+      fontSize: '13px',
+      stroke: '#000000',
+      strokeThickness: 3,
+    }).setScrollFactor(0).setDepth(25)
     this.barricadeText = this.add.text(20, 190, this.getBarricadeStatusLabel(), this.smallHudTextStyle())
     this.perkText = this.add.text(20, 214, '', this.smallHudTextStyle())
     this.toolText = this.add.text(20, 238, '', this.smallHudTextStyle())
@@ -1027,7 +1036,7 @@ export default class GameScene extends Phaser.Scene {
       return 'Left stick move\nRight pad aim and fire\nWeapon cycles guns\nRepair fixes doors\nMelee shove'
     }
 
-    return 'WASD move\nMouse aim\nHold click shoot\nE repair\n1–4 weapons\nTools: Q / T / Space'
+    return 'WASD move\nMouse aim\nHold click shoot\nE repair\n1–5 weapons\nTools: Q / T / Space'
   }
 
   private createStartMenuButton(x: number, y: number, label: string, backgroundColor: number, onClick: () => void) {
@@ -1914,37 +1923,81 @@ export default class GameScene extends Phaser.Scene {
     this.healthFill.height = 18
     this.healthText.setPosition(left + 8, top + 3)
     this.healthText.setFontSize(narrow ? 12 : 14)
+    const hudObjects = [
+      this.healthBarBg,
+      this.healthFill,
+      this.healthText,
+      this.waveText,
+      this.scoreText,
+      this.cashText,
+      this.weaponText,
+      this.ownedWeaponsText,
+      this.controlsHintText,
+      this.barricadeText,
+      this.perkText,
+      this.toolText,
+      this.muteButton,
+    ]
+    hudObjects.forEach((object) => {
+      object?.setScrollFactor(0)
+      object?.setDepth(25)
+    })
 
-    const hideCombatHud = Boolean(this.shopOverlay || this.perkOverlay || this.startOverlay || this.gameOverOverlay)
-    const line = narrow ? 22 : 28
-    this.waveText.setPosition(left, top + 30)
-    this.scoreText.setPosition(left, top + 30 + line)
-    this.cashText.setPosition(left, top + 30 + line * 2)
-    this.weaponText.setPosition(left, top + 30 + line * 3)
-    this.ownedWeaponsText.setPosition(left, top + 30 + line * 4)
-    this.barricadeText.setPosition(left, top + 30 + line * 5)
-    this.perkText.setPosition(left, top + 30 + line * 6)
-    this.perkText.setWordWrapWidth(narrow ? 160 : 260)
-    this.toolText.setPosition(left, top + 30 + line * 7)
-    this.multiplayerText.setPosition(left, top + 30 + line * 8)
+    const hideCombatHud = Boolean(this.startOverlay || this.gameOverOverlay)
+    const wrapWidth = Math.max(150, right - left - 136)
+    this.ownedWeaponsText.setText(this.getOwnedWeaponsLabel())
+    this.ownedWeaponsText.setWordWrapWidth(wrapWidth)
+    this.controlsHintText.setText(this.getPlayingControlsHint())
+    this.controlsHintText.setFontSize(narrow ? 12 : 13)
+    this.controlsHintText.setWordWrapWidth(wrapWidth)
+    this.perkText.setWordWrapWidth(wrapWidth)
     this.toolText.setText(this.formatToolHud(this.time.now))
-    this.toolText.setVisible(!hideCombatHud && this.toolText.text.length > 0)
     this.waveText.setFontSize(narrow ? 14 : 20)
     this.scoreText.setFontSize(narrow ? 14 : 20)
     this.cashText.setFontSize(narrow ? 14 : 20)
     this.weaponText.setFontSize(narrow ? 14 : 20)
-    this.healthBarBg.setVisible(!hideCombatHud)
-    this.healthFill.setVisible(!hideCombatHud)
-    this.healthText.setVisible(!hideCombatHud)
-    this.waveText.setVisible(!hideCombatHud)
-    this.scoreText.setVisible(!hideCombatHud)
-    this.cashText.setVisible(!hideCombatHud)
-    this.weaponText.setVisible(!hideCombatHud)
-    this.timerText.setVisible(!hideCombatHud)
-    this.highScoreText.setVisible(!hideCombatHud && !narrow)
-    this.ownedWeaponsText.setVisible(!hideCombatHud && !narrow)
-    this.barricadeText.setVisible(!hideCombatHud && !narrow)
-    this.perkText.setVisible(!hideCombatHud && !narrow && this.ownedPerks.length > 0)
+
+    let cursor = top + 28
+    this.waveText.setPosition(left, cursor)
+    const cashX = left + this.waveText.width + 14
+    if (cashX + this.cashText.width > right - 96) {
+      cursor += this.waveText.height + 2
+      this.cashText.setPosition(left, cursor)
+    } else {
+      this.cashText.setPosition(cashX, cursor)
+    }
+    cursor += Math.max(this.waveText.height, this.cashText.height) + 2
+    this.scoreText.setPosition(left, cursor)
+    if (!narrow) {
+      cursor += this.scoreText.height + 2
+    }
+    this.weaponText.setPosition(left, cursor)
+    cursor += this.weaponText.height + 2
+    this.ownedWeaponsText.setPosition(left, cursor)
+    cursor += this.ownedWeaponsText.height + 2
+    this.controlsHintText.setPosition(left, cursor)
+    cursor += this.controlsHintText.height + 2
+    this.barricadeText.setPosition(left, cursor)
+    cursor += this.barricadeText.height + 2
+    this.perkText.setPosition(left, cursor)
+    cursor += this.perkText.height + 2
+    this.toolText.setPosition(left, cursor)
+    this.multiplayerText.setPosition(left, cursor + this.toolText.height + 2)
+    const playing = this.isStarted && !hideCombatHud
+    this.healthBarBg.setVisible(playing)
+    this.healthFill.setVisible(playing)
+    this.healthText.setVisible(playing)
+    this.waveText.setVisible(playing)
+    this.scoreText.setVisible(playing && !narrow)
+    this.cashText.setVisible(playing)
+    this.weaponText.setVisible(playing)
+    this.ownedWeaponsText.setVisible(playing)
+    this.controlsHintText.setVisible(playing && !this.shopOverlay && !this.perkOverlay)
+    this.timerText.setVisible(playing && !this.shopOverlay && !this.perkOverlay)
+    this.highScoreText.setVisible(playing && !narrow && !this.shopOverlay && !this.perkOverlay)
+    this.barricadeText.setVisible(playing && !this.shopOverlay && !this.perkOverlay)
+    this.perkText.setVisible(playing && !this.shopOverlay && !this.perkOverlay && this.ownedPerks.length > 0)
+    this.toolText.setVisible(playing && !this.shopOverlay && !this.perkOverlay && this.toolText.text.length > 0)
     this.refreshPerkHud()
 
     this.pauseButton.setPosition(right, top)
@@ -1952,21 +2005,21 @@ export default class GameScene extends Phaser.Scene {
     this.timerText.setPosition(right, top + 48)
     this.skipRoundButton.setPosition(right, top + 84)
     this.highScoreText.setPosition(right, top + (narrow ? 128 : 134))
-    this.highScoreText.setVisible(!hideCombatHud && !narrow)
-    if (this.startOverlay) {
+    if (this.startOverlay || this.shopOverlay) {
       this.muteButton?.setVisible(false)
-    } else if (this.shopOverlay || this.perkOverlay) {
-      this.muteButton?.setVisible(true)
-      this.muteButton?.setOrigin(0, 1)
-      this.muteButton?.setPosition(left, this.scale.height - Math.max(8, inset.bottom + 4))
       this.skipRoundButton?.setVisible(false)
+    } else if (this.perkOverlay) {
+      this.muteButton?.setVisible(true)
+      this.skipRoundButton?.setVisible(false)
+      this.muteButton?.setOrigin(1, 0)
+      this.muteButton?.setPosition(right, top + 48)
     } else {
       this.muteButton?.setVisible(true)
       this.muteButton?.setOrigin(1, 0)
       this.muteButton?.setPosition(right, top + (narrow ? 128 : 168))
+      this.skipRoundButton?.setVisible(this.gameMode === 'singlePlayer' && this.isStarted && !this.isGameOver)
     }
-    const messageY = this.shopOverlay || this.perkOverlay ? this.scale.height * 0.7 : Math.max(top + 96, this.scale.height * 0.16)
-    this.messageText.setPosition(this.scale.width / 2, messageY)
+    this.messageText.setPosition(this.scale.width / 2, this.getMessageY())
     this.messageText.setWordWrapWidth(Math.max(220, this.scale.width * 0.7))
     this.damageFlash?.setPosition(this.scale.width / 2, this.scale.height / 2)
     this.damageFlash?.setSize(this.scale.width, this.scale.height)
@@ -1978,10 +2031,26 @@ export default class GameScene extends Phaser.Scene {
     this.updateHealthBar()
   }
 
+  private getPlayingControlsHint() {
+    if (this.useTouchControls) {
+      return 'Stick move · Pad fire · Weapon · Repair · Melee'
+    }
+
+    return 'WASD · Mouse aim · Hold click · E repair · 1–5 guns · Q mine · T turret · Space melee'
+  }
+
   private getOwnedWeaponsLabel() {
-    const owned = (Object.keys(weapons) as WeaponId[])
+    const owned = weaponCycle
       .filter((weaponId) => this.ownedWeapons.has(weaponId))
       .map((weaponId) => weapons[weaponId].name)
+
+    if (this.ownsMines) {
+      owned.push('Mines')
+    }
+
+    if (this.ownsTurret) {
+      owned.push('Turret')
+    }
 
     return `Owned ${owned.join(', ')}`
   }
@@ -2041,6 +2110,7 @@ export default class GameScene extends Phaser.Scene {
     this.messageTimer?.remove(false)
     this.messageText.setColor(color)
     this.messageText.setFontSize(this.isNarrowHud() ? 16 : 22)
+    this.messageText.setPosition(this.scale.width / 2, this.getMessageY())
     this.messageText.setText(message)
 
     this.messageTimer = this.time.delayedCall(1500, () => {
@@ -2051,7 +2121,7 @@ export default class GameScene extends Phaser.Scene {
   private showWaveBanner(text: string, color = '#fff2a8') {
     this.waveBanner?.destroy()
     this.waveBanner = this.add
-      .text(this.scale.width / 2, this.scale.height * 0.28, text, {
+      .text(this.scale.width / 2, Math.max(this.scale.height * 0.38, this.getHudBandBottom() + 64), text, {
         align: 'center',
         color,
         fontFamily: 'Arial',
@@ -2234,6 +2304,10 @@ export default class GameScene extends Phaser.Scene {
 
     if (Phaser.Input.Keyboard.JustDown(this.keys.FOUR)) {
       this.setWeapon('rifle')
+    }
+
+    if (Phaser.Input.Keyboard.JustDown(this.keys.FIVE)) {
+      this.setWeapon('flamethrower')
     }
   }
 
@@ -2932,81 +3006,167 @@ export default class GameScene extends Phaser.Scene {
   }
 
   private showShop() {
+    this.waveBanner?.destroy()
+    this.waveBanner = undefined
     this.hideShop()
 
     const compact = this.isCompactMenu()
-    const centerX = this.scale.width / 2
-    const centerY = this.scale.height / 2
-    const panel = this.add.rectangle(0, 0, compact ? 360 : 640, compact ? 640 : 660, 0x000000, 0.86)
-    const title = this.add
-      .text(0, compact ? -292 : -300, 'Wave Complete', {
-        color: '#fff2a8',
-        fontFamily: 'Arial',
-        fontSize: compact ? 28 : 40,
-        fontStyle: 'bold',
-      })
-      .setOrigin(0.5)
-    const bonus = this.add
-      .text(0, compact ? -256 : -258, `Wave bonus +$${this.lastWaveBonus}`, {
-        color: '#7dffb3',
-        fontFamily: 'Arial',
-        fontSize: compact ? 16 : 20,
-        fontStyle: 'bold',
-      })
-      .setOrigin(0.5)
-    this.shopStatusText = this.add
-      .text(0, compact ? -196 : -198, this.formatShopStatus(), {
-        align: 'center',
-        color: '#ffffff',
-        fontFamily: 'Arial',
-        fontSize: compact ? 15 : 16,
-        lineSpacing: 4,
-      })
-      .setOrigin(0.5)
-    const nextWave = this.wave + 1
-    const continueButton = this.createShopButton(0, compact ? 286 : 250, `Start Wave ${nextWave}`, () => this.handleNextRoundClick(), undefined, '#2ecc71', '#101316')
-    const items: Phaser.GameObjects.GameObject[] = [panel, title, bonus, this.shopStatusText, continueButton]
+    const panelWidth = Math.min(compact ? 340 : 680, Math.max(280, this.scale.width - 24))
+    const buttonWidth = compact ? panelWidth - 36 : 300
     const upgradeItems: ShopItemId[] = ['healPlayer', 'repairAll', 'damageUpgrade', 'maxHealthUpgrade']
     const gearItems: ShopItemId[] = ['buySmg', 'buyShotgun', 'buyRifle', 'buyFlamethrower', 'buyMines', 'buyTurret']
     const shopEntries = compact ? (this.shopPage === 0 ? upgradeItems : gearItems) : [...upgradeItems, ...gearItems]
+    const content: Phaser.GameObjects.GameObject[] = []
+    let cursor = 18
+
+    const title = this.add
+      .text(0, cursor, 'Wave Complete', {
+        color: '#fff2a8',
+        fontFamily: 'Arial',
+        fontSize: compact ? '26px' : '36px',
+        fontStyle: 'bold',
+      })
+      .setOrigin(0.5, 0)
+    cursor += title.height + 4
+    const bonus = this.add
+      .text(0, cursor, `Wave bonus +$${this.lastWaveBonus}`, {
+        color: '#7dffb3',
+        fontFamily: 'Arial',
+        fontSize: compact ? '15px' : '18px',
+        fontStyle: 'bold',
+      })
+      .setOrigin(0.5, 0)
+    cursor += bonus.height + 4
+    const aliveDoors = this.barricades.filter((barricade) => barricade.isAlive).length
+    this.shopStatusText = this.add
+      .text(0, cursor, `Next wave ${this.wave + 1}  ·  Doors ${aliveDoors}/${this.barricades.length}`, {
+        color: '#d9e8d9',
+        fontFamily: 'Arial',
+        fontSize: '14px',
+      })
+      .setOrigin(0.5, 0)
+    cursor += this.shopStatusText.height + 14
+    content.push(title, bonus, this.shopStatusText)
     this.shopLabels.clear()
 
-    if (compact) {
-      items.push(
-        this.createShopButton(0, 214, this.shopPage === 0 ? 'Weapons & Tools' : 'Upgrades', () => {
-          this.shopPage = this.shopPage === 0 ? 1 : 0
-          this.showShop()
-        }),
-      )
+    const columns = compact ? 1 : 2
+    for (let index = 0; index < shopEntries.length; index += columns) {
+      const rowItems = shopEntries.slice(index, index + columns)
+      const rowButtons = rowItems.map((itemId, column) => {
+        const x = compact ? 0 : column === 0 ? -buttonWidth / 2 - 8 : buttonWidth / 2 + 8
+        const button = this.createShopButton(
+          x,
+          cursor,
+          this.formatShopItemLabel(itemId),
+          () => this.handleShopItemClick(itemId),
+          shopConfig[itemId].repeatable ? () => this.buyMaxShopItem(itemId) : undefined,
+          '#20262b',
+          '#ffffff',
+          buttonWidth,
+        )
+        button.setOrigin(0.5, 0)
+        button.setY(cursor)
+        this.shopLabels.set(itemId, button)
+        content.push(button)
+        return button
+      })
+      cursor += Math.max(...rowButtons.map((button) => button.height)) + 8
     }
 
-    shopEntries.forEach((itemId, index) => {
-      const columns = compact ? 1 : 2
-      const column = index % columns
-      const row = Math.floor(index / columns)
-      const gearPage = compact && this.shopPage === 1
-      const step = compact ? (gearPage ? 56 : 50) : 68
-      const x = compact ? 0 : column === 0 ? -155 : 155
-      const y = (compact ? (gearPage ? -124 : -108) : -140) + row * step
-      const button = this.createShopButton(
-        x,
-        y,
-        this.formatShopItemLabel(itemId),
-        () => this.handleShopItemClick(itemId),
-        shopConfig[itemId].repeatable ? () => this.buyMaxShopItem(itemId) : undefined,
-        '#20262b',
-        '#ffffff',
-        compact ? 320 : 280,
-      )
-      this.shopLabels.set(itemId, button)
-      items.push(button)
-    })
+    if (compact) {
+      const pageButton = this.createShopButton(0, cursor, this.shopPage === 0 ? 'Weapons & Tools' : 'Upgrades', () => {
+        this.shopPage = this.shopPage === 0 ? 1 : 0
+        this.showShop()
+      }, undefined, '#20262b', '#fff2a8', buttonWidth)
+      pageButton.setOrigin(0.5, 0)
+      cursor += pageButton.height + 8
+      content.push(pageButton)
+    }
 
-    this.shopOverlay = this.add.container(centerX, centerY, items)
+    const continueButton = this.createShopButton(
+      0,
+      cursor,
+      `Start Wave ${this.wave + 1}`,
+      () => this.handleNextRoundClick(),
+      undefined,
+      '#2ecc71',
+      '#101316',
+      buttonWidth,
+    )
+    continueButton.setOrigin(0.5, 0)
+    cursor += continueButton.height + 8
+    const soundButton = this.add
+      .text(0, cursor, this.audio.muted ? 'Muted' : 'Sound', {
+        align: 'center',
+        backgroundColor: '#20262b',
+        color: '#d9e8d9',
+        fixedWidth: 92,
+        fontFamily: 'Arial',
+        fontSize: '14px',
+        padding: { x: 8, y: 8 },
+      })
+      .setOrigin(0.5, 0)
+      .setInteractive({ useHandCursor: true })
+    soundButton.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+      pointer.event.stopPropagation()
+      this.audio.unlock()
+      const muted = this.audio.toggleMute()
+      soundButton.setText(muted ? 'Muted' : 'Sound')
+      this.muteButton?.setText(muted ? 'Muted' : 'Sound')
+    })
+    cursor += soundButton.height + 16
+    content.push(continueButton, soundButton)
+
+    const panel = this.add.graphics()
+    panel.fillStyle(0x070809, 0.92)
+    panel.lineStyle(2, 0x353b42, 0.9)
+    panel.fillRoundedRect(-panelWidth / 2, 0, panelWidth, cursor, 12)
+    panel.strokeRoundedRect(-panelWidth / 2, 0, panelWidth, cursor, 12)
+    this.shopOverlay = this.add.container(this.scale.width / 2, 0, [panel, ...content])
     this.shopOverlay.setDepth(12)
     this.refreshShopButtons()
+    this.ownedWeaponsText.setText(this.getOwnedWeaponsLabel())
     this.layoutHud()
+    const hudBottom = this.getHudBandBottom() + 8
+    const available = Math.max(180, this.scale.height - hudBottom - 8)
+    const scale = cursor > available ? Math.max(0.68, available / cursor) : 1
+    const visualHeight = cursor * scale
+    const shopY = hudBottom + Math.max(0, (available - visualHeight) / 2)
+    this.shopOverlay.setPosition(this.scale.width / 2, shopY)
+    this.shopOverlay.setScale(scale)
     this.setTouchActionButtonsVisible(true)
+  }
+
+  private getMessageY() {
+    const inset = this.getSafeInsets()
+    if (this.shopOverlay || this.perkOverlay) {
+      return this.scale.height - Math.max(52, 40 + inset.bottom)
+    }
+
+    return this.getHudBandBottom() + 8
+  }
+
+  private getHudBandBottom() {
+    const candidates = [
+      this.healthBarBg,
+      this.waveText,
+      this.cashText,
+      this.scoreText,
+      this.weaponText,
+      this.ownedWeaponsText,
+      this.controlsHintText,
+      this.barricadeText,
+      this.perkText,
+      this.toolText,
+    ]
+    let bottom = 12 + this.getSafeInsets().top
+    candidates.forEach((object) => {
+      if (!object?.visible) {
+        return
+      }
+      bottom = Math.max(bottom, object.y + object.height)
+    })
+    return bottom
   }
 
   private hideShop() {
@@ -3042,7 +3202,8 @@ export default class GameScene extends Phaser.Scene {
         fixedWidth: width ?? (compact ? 320 : 420),
         fontFamily: 'Arial',
         fontSize: compact ? '16px' : '18px',
-        padding: { x: 12, y: 12 },
+        padding: { x: 12, y: 10 },
+        wordWrap: { width: Math.max(120, (width ?? (compact ? 320 : 420)) - 28) },
       })
       .setOrigin(0.5)
       .setInteractive({ useHandCursor: true })
@@ -3261,15 +3422,7 @@ export default class GameScene extends Phaser.Scene {
 
   private formatShopStatus() {
     const aliveDoors = this.barricades.filter((barricade) => barricade.isAlive).length
-    const perkNames = this.ownedPerks.map((id) => getPerk(id).name)
-    return [
-      `Cash $${this.cash}`,
-      `HP ${Math.ceil(this.player.health)}/${this.player.maxHealth}`,
-      `Doors ${aliveDoors}/${this.barricades.length}`,
-      `Weapons ${this.getOwnedWeaponsLabel().replace('Owned ', '')}`,
-      `Next wave ${this.wave + 1}`,
-      `Perks: ${perkNames.length > 0 ? perkNames.join(', ') : 'None'}`,
-    ].join('\n')
+    return `Next wave ${this.wave + 1}  ·  Doors ${aliveDoors}/${this.barricades.length}`
   }
 
   private formatShopItemLabel(itemId: ShopItemId) {
@@ -3344,6 +3497,7 @@ export default class GameScene extends Phaser.Scene {
   }
 
   private refreshShopButtons() {
+    this.ownedWeaponsText?.setText(this.getOwnedWeaponsLabel())
     this.shopStatusText?.setText(this.formatShopStatus())
     this.shopLabels.forEach((label, itemId) => {
       const owned = Boolean(shopWeaponUnlocks[itemId] && this.ownedWeapons.has(shopWeaponUnlocks[itemId]!))
@@ -3356,10 +3510,12 @@ export default class GameScene extends Phaser.Scene {
   private refreshPerkHud() {
     const names = this.ownedPerks.map((id) => getPerk(id).name)
     this.perkText?.setText(names.length > 0 ? `Perks ${names.join(', ')}` : '')
-    this.perkText?.setVisible(!this.isNarrowHud() && names.length > 0 && !this.shopOverlay && !this.perkOverlay)
+    this.perkText?.setVisible(names.length > 0 && this.isStarted && !this.startOverlay && !this.gameOverOverlay && !this.shopOverlay && !this.perkOverlay)
   }
 
   private showPerkChoice(choices: PerkConfig[]) {
+    this.waveBanner?.destroy()
+    this.waveBanner = undefined
     this.hideShop()
     this.perkOverlay?.destroy()
     this.pendingPerkChoices = choices
@@ -3409,7 +3565,21 @@ export default class GameScene extends Phaser.Scene {
     this.perkOverlay = this.add.container(this.scale.width / 2, this.scale.height / 2, items)
     this.perkOverlay.setDepth(16)
     this.layoutHud()
+    this.placePerkOverlay()
     this.setTouchActionButtonsVisible(true)
+  }
+
+  private placePerkOverlay() {
+    if (!this.perkOverlay) {
+      return
+    }
+
+    const panelHeight = this.isCompactMenu() ? 520 : 480
+    const top = this.getHudBandBottom() + 8
+    const available = Math.max(180, this.scale.height - top - 8)
+    const scale = panelHeight > available ? available / panelHeight : 1
+    this.perkOverlay.setScale(scale)
+    this.perkOverlay.setPosition(this.scale.width / 2, top + (panelHeight * scale) / 2)
   }
 
   private choosePerk(id: PerkId) {
@@ -4848,10 +5018,12 @@ export default class GameScene extends Phaser.Scene {
     if (this.startOverlay) {
       this.showStartScreen()
     }
+    if (this.shopOverlay) {
+      this.showShop()
+    }
     this.pauseOverlay?.setPosition(gameSize.width / 2, gameSize.height / 2)
     this.lobbyOverlay?.setPosition(gameSize.width / 2, gameSize.height / 2)
-    this.shopOverlay?.setPosition(gameSize.width / 2, gameSize.height / 2)
-    this.perkOverlay?.setPosition(gameSize.width / 2, gameSize.height / 2)
+    this.placePerkOverlay()
     this.gameOverOverlay?.setPosition(gameSize.width / 2, gameSize.height / 2)
     this.multiplayerNavDebugText?.setPosition(12, 120)
 
