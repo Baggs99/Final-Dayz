@@ -1,0 +1,36 @@
+---
+description: Dual-thumb mobile controls and phone layout for Final Dayz
+globs: src/**/*.ts,src/**/*.css,index.html
+alwaysApply: false
+---
+
+# Mobile Controls
+
+Phones are two-thumb: **left = move**, **right = aim/fire**. Never treat the left 45% of the screen as the joystick, and never use `input.activePointer` for both move and shoot.
+
+```typescript
+// ❌ BAD — any left-half tap steals the stick; shooting only sees pointer 1
+if (pointer.x > this.scale.width * 0.45) return
+if (this.input.activePointer.isDown && !this.isTouchJoystickPointer(this.input.activePointer)) {
+  this.tryShoot(time)
+}
+
+// ✅ GOOD — capture only inside a left pad; fire from a right pad / button / other pointer
+if (this.isInsideMovePad(pointer)) this.captureMovePointer(pointer)
+if (this.isInsideFirePad(pointer) || this.isAimPointer(pointer)) this.tryShoot(time)
+```
+
+## Required behavior
+
+- Left virtual stick stays in the bottom-left safe area (`safe-area-inset-*`). Hit box ≈ visible stick, not half the canvas.
+- Right side has an explicit fire control (button or aim stick). Holding it shoots; it does not steal the move pointer.
+- Aim from the right stick / last aim vector, not from a finger sitting on the world.
+- Support two simultaneous pointers. Do not reset `pointerId` on every resize unless the finger lifted.
+- Desktop WASD + mouse stay unchanged when no coarse pointer is present.
+
+## Layout
+
+- HUD, Pause, Skip Round, and the stick must not overlap. Collapse or iconify HUD on narrow widths.
+- Menus (start, shop, game over) must fit a 390×700 viewport. No 680×540 fixed panels.
+- `index.html`: `viewport-fit=cover`, `user-scalable=no`. CSS: `touch-action: none`, `100dvh` not `100vh`.
+- Touch targets ≥ 44px. Repair / weapon swap need on-screen buttons on touch devices.

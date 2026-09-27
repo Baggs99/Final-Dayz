@@ -1,12 +1,14 @@
 import Phaser from 'phaser'
+import type { WeaponId } from '../config/weapons'
 
 export default class Bullet extends Phaser.Physics.Arcade.Sprite {
   damage: number
   speed: number
+  weaponId: WeaponId
   lifespan = 1600
   private bornAt = 0
 
-  constructor(scene: Phaser.Scene, x: number, y: number, damage: number, speed: number) {
+  constructor(scene: Phaser.Scene, x: number, y: number, damage: number, speed: number, weaponId: WeaponId = 'pistol') {
     super(scene, x, y, 'bullet')
 
     scene.add.existing(this)
@@ -14,6 +16,7 @@ export default class Bullet extends Phaser.Physics.Arcade.Sprite {
 
     this.damage = damage
     this.speed = speed
+    this.weaponId = weaponId
     this.bornAt = scene.time.now
     this.setCircle(4)
   }

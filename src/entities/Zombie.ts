@@ -47,9 +47,11 @@ export default class Zombie extends Phaser.Physics.Arcade.Sprite {
   lastStuckY = 0
   debugLabel?: Phaser.GameObjects.Text
   private lastAttackAt = 0
+  private healthBarWidth = 32
   private healthBarBg: Phaser.GameObjects.Rectangle
   private healthBarFill: Phaser.GameObjects.Rectangle
   private flashTimer?: Phaser.Time.TimerEvent
+  private aura?: Phaser.GameObjects.Arc
 
   constructor(scene: Phaser.Scene, x: number, y: number, wave: number, enemyType: EnemyType = 'walker') {
     super(scene, x, y, 'zombie')
@@ -79,8 +81,17 @@ export default class Zombie extends Phaser.Physics.Arcade.Sprite {
     this.setTint(config.color)
     this.setDisplaySize(config.radius * 2, config.radius * 2)
 
-    this.healthBarBg = scene.add.rectangle(this.x, this.y - 28, 34, 5, 0x111111)
-    this.healthBarFill = scene.add.rectangle(this.x, this.y - 28, 32, 3, 0x7bed65)
+    const isWarden = enemyType === 'warden'
+    this.healthBarWidth = isWarden ? 78 : 32
+    const barOffset = isWarden ? 42 : 28
+    this.healthBarBg = scene.add.rectangle(this.x, this.y - barOffset, this.healthBarWidth + 2, isWarden ? 8 : 5, 0x111111)
+    this.healthBarFill = scene.add.rectangle(this.x, this.y - barOffset, this.healthBarWidth, isWarden ? 6 : 3, isWarden ? 0x8eb4ff : 0x7bed65)
+    this.healthBarBg.setDepth(3)
+    this.healthBarFill.setDepth(3)
+
+    if (isWarden && this.screamRadius > 0) {
+      this.aura = scene.add.circle(x, y, this.screamRadius, config.color, 0.08).setStrokeStyle(2, config.color, 0.45).setDepth(1)
+    }
   }
 
   chase(player: Player) {
@@ -128,12 +139,14 @@ export default class Zombie extends Phaser.Physics.Arcade.Sprite {
 
   preUpdate(time: number, delta: number) {
     super.preUpdate(time, delta)
+    this.aura?.setPosition(this.x, this.y)
     this.updateHealthBarPosition()
   }
 
   destroy(fromScene?: boolean) {
     this.flashTimer?.remove(false)
     this.debugLabel?.destroy()
+    this.aura?.destroy()
     this.healthBarBg.destroy()
     this.healthBarFill.destroy()
     super.destroy(fromScene)
@@ -152,17 +165,18 @@ export default class Zombie extends Phaser.Physics.Arcade.Sprite {
 
   private applyKnockback(knockbackX: number, knockbackY: number) {
     const body = this.body as Phaser.Physics.Arcade.Body
-    body.velocity.x += knockbackX * 160
-    body.velocity.y += knockbackY * 160
+    body.velocity.x += knockbackX * 220
+    body.velocity.y += knockbackY * 220
   }
 
   private updateHealthBar() {
     const healthPercent = Phaser.Math.Clamp(this.health / this.maxHealth, 0, 1)
-    this.healthBarFill.width = 32 * healthPercent
+    this.healthBarFill.width = this.healthBarWidth * healthPercent
   }
 
   private updateHealthBarPosition() {
-    this.healthBarBg.setPosition(this.x, this.y - 28)
-    this.healthBarFill.setPosition(this.x - (32 - this.healthBarFill.width) / 2, this.y - 28)
+    const barOffset = this.enemyType === 'warden' ? 42 : 28
+    this.healthBarBg.setPosition(this.x, this.y - barOffset)
+    this.healthBarFill.setPosition(this.x - (this.healthBarWidth - this.healthBarFill.width) / 2, this.y - barOffset)
   }
 }

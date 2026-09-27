@@ -1,6 +1,6 @@
 import Phaser from 'phaser'
 import { barricadeConfig } from '../config/barricades'
-import { getBossEnemyTypeForWave, pickEnemyTypeForWave, type EnemyType } from '../config/enemies'
+import { enemyConfigs, getBossEnemyTypeForWave, pickEnemyTypeForWave, type EnemyType } from '../config/enemies'
 import {
   formatBestHighScoreLabel,
   formatHighScoreBoard,
@@ -13,6 +13,7 @@ import { persistHighScore, syncHighScoresFromServer } from '../network/highScore
 import { shopConfig, shopUpgradeConfig, shopWeaponUnlocks, type ShopItemId } from '../config/shop'
 import { waveConfig } from '../config/waves'
 import { defaultWeaponId, type WeaponConfig, type WeaponId, weapons } from '../config/weapons'
+import { GameAudio, type SoundId } from '../audio/gameAudio'
 import Barricade from '../entities/Barricade'
 import Bullet from '../entities/Bullet'
 import Player from '../entities/Player'
@@ -66,13 +67,15 @@ type GridCell = {
   y: number
 }
 
-type TouchJoystick = {
+type TouchPad = {
   base: Phaser.GameObjects.Arc
   knob: Phaser.GameObjects.Arc
+  label: Phaser.GameObjects.Text
   pointerId?: number
   centerX: number
   centerY: number
   radius: number
+  grabRadius: number
   vector: Phaser.Math.Vector2
 }
 
@@ -117,7 +120,11 @@ export default class GameScene extends Phaser.Scene {
   private pauseButton!: Phaser.GameObjects.Text
   private skipRoundButton!: Phaser.GameObjects.Text
   private highScoreText!: Phaser.GameObjects.Text
+  private healthBarBg!: Phaser.GameObjects.Rectangle
+  private healthBarMaxWidth = 200
   private startHighScoreLabel?: Phaser.GameObjects.Text
+  private touchWeaponButton?: Phaser.GameObjects.Text
+  private touchRepairButton?: Phaser.GameObjects.Text
   private isSavingHighScore = false
   private timerText!: Phaser.GameObjects.Text
   private pauseOverlay?: Phaser.GameObjects.Text
@@ -175,9 +182,18 @@ export default class GameScene extends Phaser.Scene {
   private navDebugObjects: Phaser.GameObjects.GameObject[] = []
   private navPathDebugObjects: Phaser.GameObjects.GameObject[] = []
   private debugNavRender = false
+  private coopDebug = false
+  private audio = new GameAudio()
+  private damageFlash!: Phaser.GameObjects.Rectangle
+  private muteButton!: Phaser.GameObjects.Text
+  private waveBanner?: Phaser.GameObjects.Text
+  private doorWarnings = new Map<EntryPointId, Phaser.GameObjects.Text>()
+  private doorToastAt = new Map<EntryPointId, number>()
   private multiplayerNavDebugObjects: Phaser.GameObjects.GameObject[] = []
   private multiplayerNavDebugText?: Phaser.GameObjects.Text
-  private touchJoystick?: TouchJoystick
+  private useTouchControls = false
+  private movePad?: TouchPad
+  private firePad?: TouchPad
   private lastAimWorldPoint = new Phaser.Math.Vector2(0, 0)
 
   constructor() {
@@ -192,7 +208,9 @@ export default class GameScene extends Phaser.Scene {
   }
 
   create() {
-    this.debugNavRender = new URLSearchParams(window.location.search).get('debugNav') === '1'
+    const params = new URLSearchParams(window.location.search)
+    this.debugNavRender = params.get('debugNav') === '1'
+    this.coopDebug = params.get('coopDebug') === '1'
     this.physics.world.setBounds(0, 0, this.scale.width, this.scale.height)
     this.input.mouse?.disableContextMenu()
 
@@ -220,6 +238,8 @@ export default class GameScene extends Phaser.Scene {
     this.createTouchControls()
     this.showStartScreen()
     this.syncLeaderboard()
+    this.input.on('pointerdown', this.unlockAudio, this)
+    this.input.keyboard?.on('keydown', this.unlockAudio, this)
 
     this.scale.on('resize', this.handleResize, this)
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
@@ -228,6 +248,8 @@ export default class GameScene extends Phaser.Scene {
       this.input.off('pointermove', this.handleTouchPointerMove, this)
       this.input.off('pointerup', this.handleTouchPointerUp, this)
       this.input.off('pointerupoutside', this.handleTouchPointerUp, this)
+      this.input.off('pointerdown', this.unlockAudio, this)
+      this.input.keyboard?.off('keydown', this.unlockAudio, this)
       this.input.keyboard?.off('keydown', this.handleInitialsKeydown, this)
       this.disconnectMultiplayer()
     })
@@ -258,7 +280,7 @@ export default class GameScene extends Phaser.Scene {
     }
     this.sendMultiplayerState(time)
 
-    if (!this.isIntermission && this.input.activePointer.isDown && !this.isTouchJoystickPointer(this.input.activePointer)) {
+    if (!this.isIntermission && this.isFiringInputActive()) {
       this.tryShoot(time)
     }
 
@@ -435,7 +457,7 @@ export default class GameScene extends Phaser.Scene {
   }
 
   private createHud() {
-    this.add.rectangle(20, 20, 204, 24, 0x111111, 0.85).setOrigin(0).setScrollFactor(0)
+    this.healthBarBg = this.add.rectangle(20, 20, 204, 24, 0x111111, 0.85).setOrigin(0).setScrollFactor(0)
     this.healthFill = this.add.rectangle(22, 22, 200, 20, 0x2ecc71).setOrigin(0).setScrollFactor(0)
     this.healthText = this.add.text(28, 23, 'HP 100', {
       color: '#ffffff',
@@ -452,12 +474,38 @@ export default class GameScene extends Phaser.Scene {
     this.multiplayerText = this.add.text(20, 214, '', this.smallHudTextStyle())
     this.messageText = this.add.text(this.scale.width / 2, 34, '', {
       align: 'center',
-      color: '#fff2a8',
+      color: '#ffffff',
       fontFamily: 'Arial',
       fontSize: '20px',
       stroke: '#000000',
       strokeThickness: 4,
-    }).setOrigin(0.5, 0)
+      wordWrap: { width: Math.max(220, this.scale.width * 0.72) },
+    }).setOrigin(0.5, 0).setDepth(16).setScrollFactor(0)
+    this.damageFlash = this.add
+      .rectangle(this.scale.width / 2, this.scale.height / 2, this.scale.width, this.scale.height, 0xff2222, 0)
+      .setScrollFactor(0)
+      .setDepth(18)
+    this.muteButton = this.add
+      .text(this.scale.width - 20, 168, this.audio.muted ? 'Muted' : 'Sound', {
+        align: 'center',
+        backgroundColor: '#20262b',
+        color: '#fff2a8',
+        fixedWidth: 88,
+        fontFamily: 'Arial',
+        fontSize: '16px',
+        fontStyle: 'bold',
+        padding: { x: 8, y: 12 },
+      })
+      .setOrigin(1, 0)
+      .setScrollFactor(0)
+      .setDepth(16)
+      .setInteractive({ useHandCursor: true })
+    this.muteButton.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+      pointer.event.stopPropagation()
+      this.audio.unlock()
+      const muted = this.audio.toggleMute()
+      this.muteButton.setText(muted ? 'Muted' : 'Sound')
+    })
     this.repairHintText = this.add.text(this.scale.width / 2, this.scale.height - 72, '', {
       align: 'center',
       color: '#ffffff',
@@ -473,7 +521,7 @@ export default class GameScene extends Phaser.Scene {
         fixedWidth: 92,
         fontFamily: 'Arial',
         fontSize: '18px',
-        padding: { x: 10, y: 6 },
+        padding: { x: 10, y: 10 },
       })
       .setOrigin(1, 0)
       .setScrollFactor(0)
@@ -501,7 +549,7 @@ export default class GameScene extends Phaser.Scene {
         color: '#fff2a8',
         fontFamily: 'Arial',
         fontSize: '16px',
-        padding: { x: 10, y: 6 },
+        padding: { x: 10, y: 10 },
       })
       .setOrigin(1, 0)
       .setScrollFactor(0)
@@ -523,6 +571,8 @@ export default class GameScene extends Phaser.Scene {
       })
       .setOrigin(1, 0)
       .setScrollFactor(0)
+
+    this.layoutHud()
   }
 
   private createTouchControls() {
@@ -532,27 +582,14 @@ export default class GameScene extends Phaser.Scene {
       return
     }
 
-    const radius = 54
-    const centerX = 86
-    const centerY = this.scale.height - 92
-    const base = this.add
-      .circle(centerX, centerY, radius, 0x111111, 0.34)
-      .setStrokeStyle(3, 0xffffff, 0.42)
-      .setScrollFactor(0)
-      .setDepth(50)
-    const knob = this.add
-      .circle(centerX, centerY, 22, 0xffffff, 0.46)
-      .setScrollFactor(0)
-      .setDepth(51)
-
-    this.touchJoystick = {
-      base,
-      knob,
-      centerX,
-      centerY,
-      radius,
-      vector: new Phaser.Math.Vector2(0, 0),
-    }
+    this.useTouchControls = true
+    this.movePad = this.createTouchPad('MOVE', 0x111111, 0xffffff)
+    this.firePad = this.createTouchPad('FIRE', 0x3b1515, 0xff6b6b)
+    this.touchWeaponButton = this.createTouchActionButton('Weapon', () => this.cycleOwnedWeapon())
+    this.touchRepairButton = this.createTouchActionButton('Repair', () => this.tryRepair())
+    this.layoutTouchControls(this.scale.gameSize)
+    this.setTouchActionButtonsVisible(false)
+    this.layoutHud()
 
     this.input.addPointer(2)
     this.input.on('pointerdown', this.handleTouchPointerDown, this)
@@ -561,128 +598,251 @@ export default class GameScene extends Phaser.Scene {
     this.input.on('pointerupoutside', this.handleTouchPointerUp, this)
   }
 
-  private handleTouchPointerDown(pointer: Phaser.Input.Pointer) {
-    if (!this.touchJoystick || this.touchJoystick.pointerId !== undefined || pointer.x > this.scale.width * 0.45) {
-      return
-    }
-
-    this.touchJoystick.pointerId = pointer.id
-    this.updateTouchJoystick(pointer)
-  }
-
-  private handleTouchPointerMove(pointer: Phaser.Input.Pointer) {
-    if (!this.touchJoystick || this.touchJoystick.pointerId !== pointer.id) {
-      return
-    }
-
-    this.updateTouchJoystick(pointer)
-  }
-
-  private handleTouchPointerUp(pointer: Phaser.Input.Pointer) {
-    if (!this.touchJoystick || this.touchJoystick.pointerId !== pointer.id) {
-      return
-    }
-
-    this.touchJoystick.pointerId = undefined
-    this.touchJoystick.vector.set(0, 0)
-    this.touchJoystick.knob.setPosition(this.touchJoystick.centerX, this.touchJoystick.centerY)
-  }
-
-  private updateTouchJoystick(pointer: Phaser.Input.Pointer) {
-    if (!this.touchJoystick) {
-      return
-    }
-
-    const offset = new Phaser.Math.Vector2(pointer.x - this.touchJoystick.centerX, pointer.y - this.touchJoystick.centerY)
-    const distance = offset.length()
-    const clampedDistance = Math.min(distance, this.touchJoystick.radius)
-    const direction = distance > 0 ? offset.clone().normalize() : new Phaser.Math.Vector2(0, 0)
-
-    this.touchJoystick.vector.copy(direction).scale(clampedDistance / this.touchJoystick.radius)
-    this.touchJoystick.knob.setPosition(
-      this.touchJoystick.centerX + direction.x * clampedDistance,
-      this.touchJoystick.centerY + direction.y * clampedDistance,
-    )
-  }
-
-  private updateTouchJoystickPosition(gameSize: Phaser.Structs.Size) {
-    if (!this.touchJoystick) {
-      return
-    }
-
-    this.touchJoystick.centerX = 86
-    this.touchJoystick.centerY = gameSize.height - 92
-    this.touchJoystick.vector.set(0, 0)
-    this.touchJoystick.pointerId = undefined
-    this.touchJoystick.base.setPosition(this.touchJoystick.centerX, this.touchJoystick.centerY)
-    this.touchJoystick.knob.setPosition(this.touchJoystick.centerX, this.touchJoystick.centerY)
-  }
-
-  private showStartScreen() {
-    const centerX = this.scale.width / 2
-    const centerY = this.scale.height / 2
-    const panel = this.add.rectangle(0, 0, 680, 540, 0x000000, 0.82)
-    const title = this.add
-      .text(0, -205, 'FINAL DAYZ', {
-        color: '#ff5555',
-        fontFamily: 'Arial',
-        fontSize: '56px',
-        fontStyle: 'bold',
-      })
-      .setOrigin(0.5)
-    this.startHighScoreLabel = this.add
-      .text(0, 22, formatBestHighScoreLabel(), {
-        color: '#fff2a8',
-        fontFamily: 'Arial',
-        fontSize: '22px',
-      })
-      .setOrigin(0.5)
-    const instructions = this.add
-      .text(0, -88, 'WASD to move\nMouse to aim\nHold left click to shoot\n1/2/3 switch weapons\nE repairs damaged barricades', {
-        align: 'center',
+  private createTouchPad(label: string, baseColor: number, knobColor: number): TouchPad {
+    const radius = 52
+    const base = this.add
+      .circle(0, 0, radius, baseColor, 0.4)
+      .setStrokeStyle(3, knobColor, 0.55)
+      .setScrollFactor(0)
+      .setDepth(50)
+    const knob = this.add.circle(0, 0, 20, knobColor, 0.5).setScrollFactor(0).setDepth(51)
+    const text = this.add
+      .text(0, 0, label, {
         color: '#ffffff',
         fontFamily: 'Arial',
-        fontSize: '22px',
-        lineSpacing: 10,
-      })
-      .setOrigin(0.5)
-    const singlePlayerButton = this.createStartMenuButton(0, 72, 'Single Player', 0x2ecc71, () => this.startGame('singlePlayer'))
-    const createRoomButton = this.createStartMenuButton(0, 134, 'Create Co-op Room', 0x4aa3ff, () => this.createCoopRoom())
-    const joinRoomButton = this.createStartMenuButton(0, 196, 'Join Co-op Room', 0xffc857, () => this.promptJoinCoopRoom())
-    this.multiplayerStatusText = this.add
-      .text(0, 250, '', {
-        align: 'center',
-        color: '#fff2a8',
-        fontFamily: 'Arial',
-        fontSize: '18px',
+        fontSize: '12px',
+        fontStyle: 'bold',
         stroke: '#000000',
         strokeThickness: 3,
       })
       .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(52)
 
-    this.startOverlay = this.add.container(centerX, centerY, [
-      panel,
-      title,
-      this.startHighScoreLabel,
-      instructions,
-      singlePlayerButton,
-      createRoomButton,
-      joinRoomButton,
-      this.multiplayerStatusText,
-    ])
+    return {
+      base,
+      knob,
+      label: text,
+      centerX: 0,
+      centerY: 0,
+      radius,
+      grabRadius: radius + 18,
+      vector: new Phaser.Math.Vector2(0, 0),
+    }
+  }
+
+  private createTouchActionButton(label: string, onClick: () => void) {
+    const button = this.add
+      .text(0, 0, label, {
+        align: 'center',
+        backgroundColor: '#20262b',
+        color: '#ffffff',
+        fixedWidth: 88,
+        fontFamily: 'Arial',
+        fontSize: '16px',
+        fontStyle: 'bold',
+        padding: { x: 8, y: 12 },
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(52)
+      .setInteractive({ useHandCursor: true })
+
+    button.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+      pointer.event.stopPropagation()
+      onClick()
+    })
+
+    return button
+  }
+
+  private handleTouchPointerDown(pointer: Phaser.Input.Pointer) {
+    if (this.isBlockingOverlayOpen()) {
+      return
+    }
+
+    if (this.movePad && this.movePad.pointerId === undefined && this.isInsidePad(this.movePad, pointer)) {
+      this.movePad.pointerId = pointer.id
+      this.updateTouchPad(this.movePad, pointer)
+      return
+    }
+
+    if (this.firePad && this.firePad.pointerId === undefined && this.isInsidePad(this.firePad, pointer)) {
+      this.firePad.pointerId = pointer.id
+      this.updateTouchPad(this.firePad, pointer)
+    }
+  }
+
+  private handleTouchPointerMove(pointer: Phaser.Input.Pointer) {
+    if (this.movePad?.pointerId === pointer.id) {
+      this.updateTouchPad(this.movePad, pointer)
+    }
+
+    if (this.firePad?.pointerId === pointer.id) {
+      this.updateTouchPad(this.firePad, pointer)
+    }
+  }
+
+  private handleTouchPointerUp(pointer: Phaser.Input.Pointer) {
+    if (this.movePad?.pointerId === pointer.id) {
+      this.releaseTouchPad(this.movePad)
+    }
+
+    if (this.firePad?.pointerId === pointer.id) {
+      this.releaseTouchPad(this.firePad)
+    }
+  }
+
+  private isInsidePad(pad: TouchPad, pointer: Phaser.Input.Pointer) {
+    return Phaser.Math.Distance.Between(pointer.x, pointer.y, pad.centerX, pad.centerY) <= pad.grabRadius
+  }
+
+  private updateTouchPad(pad: TouchPad, pointer: Phaser.Input.Pointer) {
+    const offset = new Phaser.Math.Vector2(pointer.x - pad.centerX, pointer.y - pad.centerY)
+    const distance = offset.length()
+    const clampedDistance = Math.min(distance, pad.radius)
+    const direction = distance > 0 ? offset.clone().normalize() : new Phaser.Math.Vector2(0, 0)
+
+    pad.vector.copy(direction).scale(clampedDistance / pad.radius)
+    pad.knob.setPosition(pad.centerX + direction.x * clampedDistance, pad.centerY + direction.y * clampedDistance)
+  }
+
+  private releaseTouchPad(pad: TouchPad) {
+    pad.pointerId = undefined
+    pad.vector.set(0, 0)
+    pad.knob.setPosition(pad.centerX, pad.centerY)
+  }
+
+  private layoutTouchControls(gameSize: Phaser.Structs.Size) {
+    if (!this.movePad || !this.firePad) {
+      return
+    }
+
+    const inset = this.getSafeInsets()
+    const radius = this.movePad.radius
+    const bottom = gameSize.height - Math.max(18, inset.bottom + 12) - radius
+
+    this.placeTouchPad(this.movePad, Math.max(18, inset.left + 12) + radius, bottom)
+    this.placeTouchPad(this.firePad, gameSize.width - Math.max(18, inset.right + 12) - radius, bottom)
+
+    const fireX = this.firePad.centerX
+    const fireTop = this.firePad.centerY - radius - 36
+    this.touchWeaponButton?.setPosition(fireX, fireTop - 56)
+    this.touchRepairButton?.setPosition(fireX, fireTop)
+  }
+
+  private placeTouchPad(pad: TouchPad, x: number, y: number) {
+    pad.centerX = x
+    pad.centerY = y
+    pad.base.setPosition(x, y)
+    pad.label.setPosition(x, y)
+    if (pad.pointerId === undefined) {
+      pad.knob.setPosition(x, y)
+    }
+  }
+
+  private showStartScreen() {
+    const status = this.multiplayerStatusText?.text ?? ''
+    this.startOverlay?.destroy()
+
+    const compact = this.isCompactMenu()
+    const centerX = this.scale.width / 2
+    const centerY = this.scale.height / 2
+    const panel = this.add.rectangle(0, 0, compact ? 360 : 680, compact ? 500 : 540, 0x000000, 0.82)
+    const title = this.add
+      .text(0, compact ? -200 : -205, 'FINAL DAYZ', {
+        color: '#ff5555',
+        fontFamily: 'Arial',
+        fontSize: compact ? 34 : 56,
+        fontStyle: 'bold',
+      })
+      .setOrigin(0.5)
+    this.startHighScoreLabel = this.add
+      .text(0, compact ? 8 : 22, formatBestHighScoreLabel(), {
+        color: '#fff2a8',
+        fontFamily: 'Arial',
+        fontSize: compact ? 16 : 22,
+      })
+      .setOrigin(0.5)
+    const instructions = this.add
+      .text(0, compact ? -100 : -88, this.getStartInstructions(), {
+        align: 'center',
+        color: '#ffffff',
+        fontFamily: 'Arial',
+        fontSize: compact ? 15 : 22,
+        lineSpacing: compact ? 6 : 10,
+      })
+      .setOrigin(0.5)
+    const buttonY = compact ? 64 : 72
+    const buttonGap = compact ? 58 : 62
+    const singlePlayerButton = this.createStartMenuButton(0, buttonY, 'Single Player', 0x2ecc71, () => this.startGame('singlePlayer'))
+    const menuItems: Phaser.GameObjects.GameObject[] = [panel, title, this.startHighScoreLabel, instructions, singlePlayerButton]
+
+    if (this.coopDebug) {
+      menuItems.push(this.createStartMenuButton(0, buttonY + buttonGap, 'Create Co-op Room', 0x4aa3ff, () => this.createCoopRoom()))
+      menuItems.push(this.createStartMenuButton(0, buttonY + buttonGap * 2, 'Join Co-op Room', 0xffc857, () => this.promptJoinCoopRoom()))
+      this.multiplayerStatusText = this.add
+        .text(0, buttonY + buttonGap * 3 + 8, status, {
+          align: 'center',
+          color: '#fff2a8',
+          fontFamily: 'Arial',
+          fontSize: compact ? 14 : 18,
+          stroke: '#000000',
+          strokeThickness: 3,
+          wordWrap: { width: compact ? 320 : 520 },
+        })
+        .setOrigin(0.5)
+      menuItems.push(this.multiplayerStatusText)
+    } else {
+      this.multiplayerStatusText = undefined
+      menuItems.push(
+        this.add
+          .text(0, buttonY + buttonGap + 6, 'Co-op coming soon', {
+            align: 'center',
+            color: '#8d9794',
+            fontFamily: 'Arial',
+            fontSize: compact ? 18 : 22,
+            fontStyle: 'bold',
+          })
+          .setOrigin(0.5),
+      )
+      menuItems.push(
+        this.add
+          .text(0, buttonY + buttonGap + (compact ? 36 : 42), 'Online co-op is being rebuilt\nfor smoother gameplay.', {
+            align: 'center',
+            color: '#6f7874',
+            fontFamily: 'Arial',
+            fontSize: compact ? 14 : 16,
+            lineSpacing: 4,
+          })
+          .setOrigin(0.5),
+      )
+    }
+
+    this.startOverlay = this.add.container(centerX, centerY, menuItems)
     this.startOverlay.setDepth(10)
+    this.layoutHud()
+  }
+
+  private getStartInstructions() {
+    if (this.useTouchControls) {
+      return 'Left stick to move\nRight pad to aim and fire\nWeapon cycles guns\nRepair fixes nearby barricades'
+    }
+
+    return 'WASD to move\nMouse to aim\nHold left click to shoot\n1/2/3 switch weapons\nE repairs damaged barricades'
   }
 
   private createStartMenuButton(x: number, y: number, label: string, backgroundColor: number, onClick: () => void) {
+    const compact = this.isCompactMenu()
     const button = this.add
       .text(x, y, label, {
         backgroundColor: Phaser.Display.Color.IntegerToColor(backgroundColor).rgba,
         color: '#101316',
-        fixedWidth: 250,
+        fixedWidth: compact ? 280 : 250,
         fontFamily: 'Arial',
-        fontSize: '22px',
+        fontSize: compact ? 18 : 22,
         fontStyle: 'bold',
-        padding: { x: 14, y: 10 },
+        padding: { x: 14, y: compact ? 12 : 10 },
       })
       .setAlign('center')
       .setOrigin(0.5)
@@ -704,6 +864,8 @@ export default class GameScene extends Phaser.Scene {
     this.startOverlay = undefined
     this.startHighScoreLabel = undefined
     this.multiplayerStatusText = undefined
+    this.layoutHud()
+    this.setTouchActionButtonsVisible(true)
     this.isIntermission = true
     this.multiplayerText.setText(this.activeRoomCode ? `Room ${this.activeRoomCode}` : '')
     if (mode === 'multiplayer') {
@@ -815,12 +977,13 @@ export default class GameScene extends Phaser.Scene {
     this.multiplayerStatusText = undefined
     this.lobbyOverlay?.destroy()
 
-    const panel = this.add.rectangle(0, 0, 620, 390, 0x000000, 0.86)
+    const compact = this.isCompactMenu()
+    const panel = this.add.rectangle(0, 0, compact ? 360 : 620, compact ? 460 : 390, 0x000000, 0.86)
     const title = this.add
-      .text(0, -150, 'CO-OP LOBBY', {
+      .text(0, compact ? -180 : -150, 'CO-OP LOBBY', {
         color: '#fff2a8',
         fontFamily: 'Arial',
-        fontSize: '36px',
+        fontSize: compact ? 28 : 36,
         fontStyle: 'bold',
       })
       .setOrigin(0.5)
@@ -1052,12 +1215,12 @@ export default class GameScene extends Phaser.Scene {
     this.createMuzzleFlash(payload.x, payload.y, angle, 0xffc857)
   }
 
-  private createMuzzleFlash(x: number, y: number, angle: number, color = 0xfff2a8) {
+  private createMuzzleFlash(x: number, y: number, angle: number, color = 0xfff2a8, radius = 7) {
     const distance = 32
     const flash = this.add.circle(
       x + Math.cos(angle) * distance,
       y + Math.sin(angle) * distance,
-      7,
+      radius,
       color,
       0.95,
     )
@@ -1486,10 +1649,100 @@ export default class GameScene extends Phaser.Scene {
     return {
       color: '#d9e8d9',
       fontFamily: 'Arial',
-      fontSize: '16px',
+      fontSize: this.isNarrowHud() ? '13px' : '16px',
       stroke: '#000000',
       strokeThickness: 3,
     }
+  }
+
+  private isCompactMenu() {
+    return this.scale.width < 520 || this.scale.height < 720
+  }
+
+  private isNarrowHud() {
+    return this.scale.width < 540
+  }
+
+  private isBlockingOverlayOpen() {
+    return Boolean(this.startOverlay || this.shopOverlay || this.lobbyOverlay || this.gameOverOverlay || this.isPaused)
+  }
+
+  private getSafeInsets() {
+    const root = getComputedStyle(document.documentElement)
+    return {
+      top: parseFloat(root.getPropertyValue('--sat')) || 0,
+      right: parseFloat(root.getPropertyValue('--sar')) || 0,
+      bottom: parseFloat(root.getPropertyValue('--sab')) || 0,
+      left: parseFloat(root.getPropertyValue('--sal')) || 0,
+    }
+  }
+
+  private setTouchActionButtonsVisible(visible: boolean) {
+    const showWeapon = visible && this.useTouchControls && this.isStarted && !this.isGameOver
+    const showRepair = showWeapon && this.gameMode === 'singlePlayer'
+    this.touchWeaponButton?.setVisible(showWeapon)
+    this.touchRepairButton?.setVisible(showRepair)
+    this.movePad?.base.setVisible(showWeapon)
+    this.movePad?.knob.setVisible(showWeapon)
+    this.movePad?.label.setVisible(showWeapon)
+    this.firePad?.base.setVisible(showWeapon)
+    this.firePad?.knob.setVisible(showWeapon)
+    this.firePad?.label.setVisible(showWeapon)
+  }
+
+  private layoutHud() {
+    const inset = this.getSafeInsets()
+    const narrow = this.isNarrowHud()
+    const left = 12 + inset.left
+    const top = 12 + inset.top
+    const right = this.scale.width - 12 - inset.right
+    this.healthBarMaxWidth = narrow ? 132 : 200
+
+    this.healthBarBg.setPosition(left, top)
+    this.healthBarBg.width = this.healthBarMaxWidth + 4
+    this.healthBarBg.height = 22
+    this.healthFill.setPosition(left + 2, top + 2)
+    this.healthFill.height = 18
+    this.healthText.setPosition(left + 8, top + 3)
+    this.healthText.setFontSize(narrow ? 12 : 14)
+
+    const line = narrow ? 22 : 28
+    this.waveText.setPosition(left, top + 30)
+    this.scoreText.setPosition(left, top + 30 + line)
+    this.cashText.setPosition(left, top + 30 + line * 2)
+    this.weaponText.setPosition(left, top + 30 + line * 3)
+    this.ownedWeaponsText.setPosition(left, top + 30 + line * 4)
+    this.barricadeText.setPosition(left, top + 30 + line * 5)
+    this.multiplayerText.setPosition(left, top + 30 + line * 6)
+    this.waveText.setFontSize(narrow ? 14 : 20)
+    this.scoreText.setFontSize(narrow ? 14 : 20)
+    this.cashText.setFontSize(narrow ? 14 : 20)
+    this.weaponText.setFontSize(narrow ? 14 : 20)
+    this.ownedWeaponsText.setVisible(!narrow)
+    this.barricadeText.setVisible(!narrow)
+
+    this.pauseButton.setPosition(right, top)
+    this.timerText.setPosition(right, top + 48)
+    this.skipRoundButton.setPosition(right, top + 84)
+    this.highScoreText.setPosition(right, top + (narrow ? 128 : 134))
+    this.highScoreText.setVisible(!narrow)
+    if (this.startOverlay) {
+      this.muteButton?.setOrigin(0.5, 1)
+      this.muteButton?.setPosition(this.scale.width / 2, this.scale.height - Math.max(16, inset.bottom + 8))
+    } else {
+      this.muteButton?.setOrigin(1, 0)
+      this.muteButton?.setPosition(right, top + (narrow ? 128 : 168))
+    }
+    this.messageText.setPosition(this.scale.width / 2, Math.max(top + 96, this.scale.height * 0.16))
+    this.messageText.setWordWrapWidth(Math.max(220, this.scale.width * 0.7))
+    this.damageFlash?.setPosition(this.scale.width / 2, this.scale.height / 2)
+    this.damageFlash?.setSize(this.scale.width, this.scale.height)
+    this.repairHintText.setPosition(
+      this.scale.width / 2,
+      this.scale.height - Math.max(150, 72 + inset.bottom + (this.useTouchControls ? 110 : 0)),
+    )
+    this.repairHintText.setFontSize(narrow ? 16 : 20)
+    this.updateHealthBar()
   }
 
   private getOwnedWeaponsLabel() {
@@ -1512,7 +1765,8 @@ export default class GameScene extends Phaser.Scene {
 
   private spendCash(amount: number) {
     if (this.cash < amount) {
-      this.showMessage('Not enough cash')
+      this.showMessage('Not enough cash', 'warning')
+      this.playSound('notEnoughCash')
       return false
     }
 
@@ -1524,13 +1778,148 @@ export default class GameScene extends Phaser.Scene {
     this.barricadeText.setText(this.getBarricadeStatusLabel())
   }
 
-  private showMessage(message: string) {
+  private unlockAudio() {
+    this.audio.unlock()
+  }
+
+  private playSound(id: SoundId) {
+    this.audio.play(this, id)
+  }
+
+  private vibrate(durationMs: number) {
+    if (!this.useTouchControls || this.audio.muted || durationMs <= 0) {
+      return
+    }
+
+    navigator.vibrate?.(durationMs)
+  }
+
+  private showMessage(message: string, kind: 'info' | 'warning' | 'danger' | 'money' = 'info') {
+    const color = {
+      info: '#ffffff',
+      warning: '#fff2a8',
+      danger: '#ff6b6b',
+      money: '#7dffb3',
+    }[kind]
+
     this.messageTimer?.remove(false)
+    this.messageText.setColor(color)
+    this.messageText.setFontSize(this.isNarrowHud() ? 16 : 22)
     this.messageText.setText(message)
 
     this.messageTimer = this.time.delayedCall(1500, () => {
       this.messageText.setText('')
     })
+  }
+
+  private showWaveBanner(text: string, color = '#fff2a8') {
+    this.waveBanner?.destroy()
+    this.waveBanner = this.add
+      .text(this.scale.width / 2, this.scale.height * 0.28, text, {
+        align: 'center',
+        color,
+        fontFamily: 'Arial',
+        fontSize: this.isNarrowHud() ? '28px' : '40px',
+        fontStyle: 'bold',
+        stroke: '#000000',
+        strokeThickness: 6,
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(17)
+
+    this.tweens.add({
+      targets: this.waveBanner,
+      alpha: 0,
+      delay: 900,
+      duration: 380,
+      onComplete: () => {
+        this.waveBanner?.destroy()
+        this.waveBanner = undefined
+      },
+    })
+  }
+
+  private doorName(id: EntryPointId) {
+    return { top: 'North', bottom: 'South', left: 'West', right: 'East' }[id]
+  }
+
+  private showDoorLabel(entry: EntryPoint, text: string) {
+    this.doorWarnings.get(entry.id)?.destroy()
+    const label = this.add
+      .text(entry.doorwayPoint.x, entry.doorwayPoint.y - 36, text, {
+        align: 'center',
+        color: '#ff5555',
+        fontFamily: 'Arial',
+        fontSize: '16px',
+        fontStyle: 'bold',
+        stroke: '#000000',
+        strokeThickness: 4,
+      })
+      .setOrigin(0.5)
+      .setDepth(8)
+
+    this.doorWarnings.set(entry.id, label)
+    this.tweens.add({
+      targets: label,
+      alpha: 0,
+      y: label.y - 16,
+      delay: 1100,
+      duration: 420,
+      onComplete: () => {
+        label.destroy()
+        if (this.doorWarnings.get(entry.id) === label) {
+          this.doorWarnings.delete(entry.id)
+        }
+      },
+    })
+  }
+
+  private hurtPlayer(amount: number, heavy = false) {
+    if (amount <= 0 || this.isGameOver) {
+      return
+    }
+
+    this.player.takeDamage(amount)
+    this.player.setTint(0xff6666)
+    this.time.delayedCall(90, () => {
+      if (this.player.active) {
+        this.player.clearTint()
+      }
+    })
+    this.damageFlash.setAlpha(heavy ? 0.32 : 0.18)
+    this.tweens.killTweensOf(this.damageFlash)
+    this.tweens.add({ targets: this.damageFlash, alpha: 0, duration: heavy ? 220 : 140 })
+    this.healthFill.fillColor = 0xffffff
+    this.time.delayedCall(90, () => {
+      if (!this.isGameOver) {
+        this.updateHealthBar()
+      }
+    })
+    this.cameras.main.shake(heavy ? 110 : 60, heavy ? 0.005 : 0.0025)
+    this.playSound('playerHurt')
+    this.vibrate(heavy ? 28 : 16)
+    this.updateHealthBar()
+
+    if (this.player.health <= 0) {
+      this.endGame()
+    }
+  }
+
+  private spawnHitSpark(x: number, y: number, color: number, count: number, distance: number) {
+    for (let index = 0; index < count; index += 1) {
+      const spark = this.add.circle(x, y, 2, color, 0.95).setDepth(6)
+      const angle = Phaser.Math.FloatBetween(0, Math.PI * 2)
+      const travel = Phaser.Math.Between(6, distance)
+      this.tweens.add({
+        targets: spark,
+        x: x + Math.cos(angle) * travel,
+        y: y + Math.sin(angle) * travel,
+        alpha: 0,
+        duration: 130,
+        onComplete: () => spark.destroy(),
+      })
+    }
   }
 
   private updatePlayerMovement() {
@@ -1553,23 +1942,33 @@ export default class GameScene extends Phaser.Scene {
       direction.y += 1
     }
 
-    if (this.touchJoystick && this.touchJoystick.vector.lengthSq() > 0.01) {
-      direction.x += this.touchJoystick.vector.x
-      direction.y += this.touchJoystick.vector.y
+    if (this.movePad && this.movePad.vector.lengthSq() > 0.01) {
+      direction.x += this.movePad.vector.x
+      direction.y += this.movePad.vector.y
     }
 
     direction.normalize().scale(this.player.speed)
     body.setVelocity(direction.x, direction.y)
   }
 
-  private isTouchJoystickPointer(pointer: Phaser.Input.Pointer) {
-    return this.touchJoystick?.pointerId === pointer.id
+  private isFiringInputActive() {
+    if (this.useTouchControls) {
+      return this.firePad?.pointerId !== undefined
+    }
+
+    return this.input.activePointer.isDown
   }
 
   private updatePlayerAim() {
-    const pointer = this.input.activePointer
-
-    if (!this.isTouchJoystickPointer(pointer)) {
+    if (this.useTouchControls) {
+      if (this.firePad && this.firePad.vector.lengthSq() > 0.01) {
+        this.lastAimWorldPoint.set(
+          this.player.x + this.firePad.vector.x * 120,
+          this.player.y + this.firePad.vector.y * 120,
+        )
+      }
+    } else {
+      const pointer = this.input.activePointer
       const aimPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y)
       this.lastAimWorldPoint.set(aimPoint.x, aimPoint.y)
     }
@@ -1604,14 +2003,43 @@ export default class GameScene extends Phaser.Scene {
 
     this.currentWeaponId = weaponId
     this.weaponText.setText(`Weapon ${this.currentWeapon.name}`)
+    this.touchWeaponButton?.setText(this.currentWeapon.name)
     this.emitMultiplayerStateNow()
+  }
+
+  private cycleOwnedWeapon() {
+    const owned = (Object.keys(weapons) as WeaponId[]).filter((weaponId) => this.ownedWeapons.has(weaponId))
+    const currentIndex = owned.indexOf(this.currentWeaponId)
+    const nextWeapon = owned[(currentIndex + 1 + owned.length) % owned.length]
+
+    if (nextWeapon) {
+      this.setWeapon(nextWeapon)
+    }
   }
 
   private updateRepairInteraction() {
     const repairTarget = this.getNearbyDamagedBarricade()
-    this.repairHintText.setText(repairTarget ? `Press E to repair ($${barricadeConfig.repairCost})` : '')
+    const hint = this.useTouchControls
+      ? `Tap Repair ($${barricadeConfig.repairCost})`
+      : `Press E to repair ($${barricadeConfig.repairCost})`
+    this.repairHintText.setText(repairTarget ? hint : '')
 
     if (!repairTarget || !Phaser.Input.Keyboard.JustDown(this.keys.E)) {
+      return
+    }
+
+    this.tryRepair()
+  }
+
+  private tryRepair() {
+    if (this.gameMode !== 'singlePlayer') {
+      return
+    }
+
+    const repairTarget = this.getNearbyDamagedBarricade()
+
+    if (!repairTarget) {
+      this.showMessage('No damaged barricade nearby')
       return
     }
 
@@ -1623,7 +2051,8 @@ export default class GameScene extends Phaser.Scene {
     this.rebuildNavigationGrid()
     this.invalidateZombiePaths()
     this.updateBarricadeHud()
-    this.showMessage('Barricade repaired')
+    this.playSound('repair')
+    this.showMessage('Repaired', 'money')
   }
 
   private getNearbyDamagedBarricade() {
@@ -1660,7 +2089,15 @@ export default class GameScene extends Phaser.Scene {
     const firstShotOffset = weapon.bulletsPerShot > 1 ? -spreadRadians / 2 : 0
     const angleStep = weapon.bulletsPerShot > 1 ? spreadRadians / (weapon.bulletsPerShot - 1) : 0
 
-    this.createMuzzleFlash(this.player.x, this.player.y, baseAngle)
+    const muzzleRadius = weapon.id === 'shotgun' ? 14 : weapon.id === 'smg' ? 5 : 8
+    this.createMuzzleFlash(this.player.x, this.player.y, baseAngle, weapon.id === 'shotgun' ? 0xffe08a : 0xfff2a8, muzzleRadius)
+    this.playSound(weapon.id === 'shotgun' ? 'shotgunShot' : weapon.id === 'smg' ? 'smgShot' : 'pistolShot')
+    if (weapon.id === 'shotgun') {
+      this.cameras.main.shake(45, 0.0022)
+      this.vibrate(14)
+    } else if (weapon.id === 'pistol') {
+      this.vibrate(8)
+    }
 
     if (this.gameMode === 'multiplayer') {
       this.emitLocalShot(this.lastAimWorldPoint.x, this.lastAimWorldPoint.y)
@@ -1673,7 +2110,7 @@ export default class GameScene extends Phaser.Scene {
       const shotDirection = new Phaser.Math.Vector2(Math.cos(shotAngle), Math.sin(shotAngle))
       const muzzleX = this.player.x + shotDirection.x * spawnOffset
       const muzzleY = this.player.y + shotDirection.y * spawnOffset
-      const bullet = new Bullet(this, muzzleX, muzzleY, weapon.damage + this.damageBonus, weapon.bulletSpeed)
+      const bullet = new Bullet(this, muzzleX, muzzleY, weapon.damage + this.damageBonus, weapon.bulletSpeed, weapon.id)
 
       this.bullets.add(bullet)
       bullet.launch(shotDirection.x, shotDirection.y)
@@ -1730,6 +2167,13 @@ export default class GameScene extends Phaser.Scene {
     )
     this.waveText.setText(`Wave ${this.wave}`)
     this.skipRoundButton.setText('Skip Round')
+    if (this.pendingBossEnemyType) {
+      this.showWaveBanner('Wave 10: THE WARDEN', '#8eb4ff')
+      this.playSound('wardenWarn')
+    } else {
+      this.showWaveBanner(`Wave ${this.wave}`)
+      this.playSound('waveStart')
+    }
 
     this.waveSpawnTimer = this.time.addEvent({
       delay: this.spawnDelay,
@@ -1744,7 +2188,10 @@ export default class GameScene extends Phaser.Scene {
     const bonus = this.getWaveBonus(this.wave)
 
     this.updateCash(bonus)
-    this.showMessage(`Wave bonus +$${bonus}`)
+    this.showWaveBanner('Wave Complete')
+    this.showMessage(`Wave bonus +$${bonus}`, 'money')
+    this.playSound('waveComplete')
+    this.vibrate(18)
     this.skipRoundButton.setText('Next Wave')
     this.showShop()
   }
@@ -1863,24 +2310,26 @@ export default class GameScene extends Phaser.Scene {
 
     const centerX = this.scale.width / 2
     const centerY = this.scale.height / 2
-    const panel = this.add.rectangle(0, 0, 560, 500, 0x000000, 0.82)
+    const compact = this.isCompactMenu()
+    const panel = this.add.rectangle(0, 0, compact ? 360 : 560, compact ? 600 : 500, 0x000000, 0.82)
     const title = this.add
-      .text(0, -210, 'Wave Complete', {
+      .text(0, compact ? -250 : -210, 'Wave Complete', {
         color: '#fff2a8',
         fontFamily: 'Arial',
-        fontSize: '38px',
+        fontSize: compact ? 28 : 38,
         fontStyle: 'bold',
       })
       .setOrigin(0.5)
     const subtitle = this.add
-      .text(0, -166, 'Buy upgrades, then start the next wave.\nHold or 3-click an upgrade to spend all cash.', {
+      .text(0, compact ? -206 : -166, 'Buy upgrades, then start the next wave.\nHold or 3-click an upgrade to spend all cash.', {
         align: 'center',
         color: '#ffffff',
         fontFamily: 'Arial',
-        fontSize: '16px',
+        fontSize: compact ? 13 : 16,
+        wordWrap: { width: compact ? 320 : 500 },
       })
       .setOrigin(0.5)
-    const continueButton = this.createShopButton(0, 204, 'Start Next Wave / Enter', () => this.handleNextRoundClick())
+    const continueButton = this.createShopButton(0, compact ? 246 : 204, 'Start Next Wave / Enter', () => this.handleNextRoundClick())
     const items: Phaser.GameObjects.GameObject[] = [panel, title, subtitle, continueButton]
     const shopEntries: ShopItemId[] = [
       'healPlayer',
@@ -1893,7 +2342,7 @@ export default class GameScene extends Phaser.Scene {
 
     shopEntries.forEach((itemId, index) => {
       const item = shopConfig[itemId]
-      const y = -112 + index * 48
+      const y = (compact ? -148 : -112) + index * (compact ? 40 : 48)
       items.push(
         this.createShopButton(
           0,
@@ -1927,10 +2376,10 @@ export default class GameScene extends Phaser.Scene {
         align: 'center',
         backgroundColor: '#20262b',
         color: '#ffffff',
-        fixedWidth: 330,
+        fixedWidth: this.isCompactMenu() ? 310 : 330,
         fontFamily: 'Arial',
-        fontSize: '17px',
-        padding: { x: 12, y: 8 },
+        fontSize: this.isCompactMenu() ? '15px' : '17px',
+        padding: { x: 12, y: this.isCompactMenu() ? 10 : 8 },
       })
       .setOrigin(0.5)
       .setInteractive({ useHandCursor: true })
@@ -2027,12 +2476,16 @@ export default class GameScene extends Phaser.Scene {
 
     if (this.cash < item.cost) {
       if (!quiet) {
-        this.showMessage('Not enough cash')
+        this.showMessage('Not enough cash', 'warning')
+        this.playSound('notEnoughCash')
       }
       return false
     }
 
     this.updateCash(-item.cost)
+    if (!quiet) {
+      this.playSound('purchase')
+    }
 
     if (itemId === 'healPlayer') {
       this.player.health = Math.min(this.player.maxHealth, this.player.health + shopUpgradeConfig.healAmount)
@@ -2092,6 +2545,13 @@ export default class GameScene extends Phaser.Scene {
     const enemyType = this.pendingBossEnemyType ?? pickEnemyTypeForWave(this.wave)
     const zombie = new Zombie(this, x, y, this.wave, enemyType)
     this.pendingBossEnemyType = undefined
+
+    if (enemyType === 'warden') {
+      this.showMessage('THE WARDEN HAS ENTERED', 'danger')
+      this.playSound('wardenWarn')
+      this.cameras.main.shake(160, 0.006)
+      this.vibrate(36)
+    }
 
     this.zombies.add(zombie)
     this.zombiesToSpawn -= 1
@@ -2486,18 +2946,53 @@ export default class GameScene extends Phaser.Scene {
       return
     }
 
-    entry.barricade.takeDamage(Math.round(barricadeConfig.zombieAttackDamage * zombie.barricadeDamageMultiplier))
-    this.updateBarricadeHud()
+    this.strikeBarricade(entry.barricade, Math.round(barricadeConfig.zombieAttackDamage * zombie.barricadeDamageMultiplier), zombie)
 
     if (DEBUG_BARRICADE_ATTACKS) {
       console.log(
         `Zombie damaged ${entry.id} barricade: ${entry.barricade.health}/${entry.barricade.maxHealth}`,
       )
     }
+  }
 
-    if (!entry.barricade.isAlive) {
-      this.onBarricadeDestroyed(zombie)
+  private strikeBarricade(barricade: Barricade, amount: number, attacker?: Zombie) {
+    const wasAlive = barricade.isAlive
+    barricade.takeDamage(amount)
+    this.playSound('barricadeHit')
+    this.updateBarricadeHud()
+
+    const entry = this.entryPoints.find((item) => item.barricade === barricade)
+    if (!entry) {
+      return
     }
+
+    if (wasAlive && !barricade.isAlive) {
+      if (attacker) {
+        this.onBarricadeDestroyed(attacker)
+      } else {
+        this.rebuildNavigationGrid()
+        this.invalidateZombiePaths()
+      }
+      this.announceBreach(entry)
+      return
+    }
+
+    if (barricade.health / barricade.maxHealth <= 0.35) {
+      const lastToast = this.doorToastAt.get(entry.id) ?? 0
+      if (this.time.now - lastToast > 2200) {
+        this.doorToastAt.set(entry.id, this.time.now)
+        this.showMessage(`${this.doorName(entry.id)} Door under attack`, 'warning')
+        this.playSound('barricadeLow')
+      }
+    }
+  }
+
+  private announceBreach(entry: EntryPoint) {
+    this.showDoorLabel(entry, 'DOOR BREACHED')
+    this.showMessage(`${this.doorName(entry.id)} Door breached`, 'danger')
+    this.playSound('barricadeDestroyed')
+    this.cameras.main.shake(80, 0.004)
+    this.vibrate(32)
   }
 
   private onBarricadeDestroyed(zombie: Zombie) {
@@ -2508,7 +3003,6 @@ export default class GameScene extends Phaser.Scene {
     zombie.lastStuckCheckAt = 0
     this.rebuildNavigationGrid()
     this.invalidateZombiePaths()
-    this.showMessage('Barricade destroyed')
   }
 
   private updateZombieStuckState(zombie: Zombie, time: number) {
@@ -2602,24 +3096,36 @@ export default class GameScene extends Phaser.Scene {
     const deathY = zombie.y
 
     bullet.destroy()
+    const shotgunHit = bullet.weaponId === 'shotgun'
+    this.spawnHitSpark(deathX, deathY, 0xfff2a8, shotgunHit ? 5 : 3, shotgunHit ? 22 : 14)
+    this.playSound('zombieHit')
 
     if (zombie.takeDamage(bullet.damage, bulletDirection.x, bulletDirection.y)) {
       this.score += zombie.scoreValue
       this.cash += 10
       this.scoreText.setText(`Score ${this.score}`)
       this.cashText.setText(`Cash $${this.cash}`)
-      this.spawnZombieDeathEffect(deathX, deathY)
+      const deathColor = zombie.enemyType === 'exploder' ? 0xff8c1a : enemyConfigs[zombie.enemyType].color
+      const deathScale = zombie.enemyType === 'warden' ? 1.8 : 1
+      this.spawnZombieDeathEffect(deathX, deathY, deathColor, deathScale)
       this.triggerExploderBurst(zombie, deathX, deathY, false)
       this.showFloatingScore(deathX, deathY, zombie.scoreValue)
-      this.cameras.main.shake(70, 0.003)
+      if (zombie.enemyType === 'warden') {
+        this.playSound('wardenDeath')
+        this.showMessage('THE WARDEN IS DOWN', 'money')
+        this.cameras.main.shake(150, 0.007)
+      } else {
+        this.playSound('zombieDeath')
+      }
     }
   }
 
-  private spawnZombieDeathEffect(x: number, y: number) {
-    for (let i = 0; i < 10; i += 1) {
-      const particle = this.add.circle(x, y, Phaser.Math.Between(2, 4), 0x8b1e1e, 0.85)
+  private spawnZombieDeathEffect(x: number, y: number, color = 0x8b1e1e, scale = 1) {
+    const count = Math.round(8 * scale)
+    for (let i = 0; i < count; i += 1) {
+      const particle = this.add.circle(x, y, Phaser.Math.Between(2, 4) * scale, color, 0.85)
       const angle = Phaser.Math.FloatBetween(0, Math.PI * 2)
-      const distance = Phaser.Math.Between(12, 34)
+      const distance = Phaser.Math.Between(12, 34) * scale
 
       this.tweens.add({
         targets: particle,
@@ -2697,13 +3203,8 @@ export default class GameScene extends Phaser.Scene {
       return true
     }
 
-    this.player.takeDamage(zombie.spitDamage)
-    this.updateHealthBar()
+    this.hurtPlayer(zombie.spitDamage)
     this.spawnSpitEffect(zombie.x, zombie.y, this.player.x, this.player.y)
-
-    if (this.player.health <= 0) {
-      this.endGame()
-    }
 
     return true
   }
@@ -2739,7 +3240,7 @@ export default class GameScene extends Phaser.Scene {
     })
 
     if (Phaser.Math.Distance.Between(x, y, this.player.x, this.player.y) <= zombie.explosionRadius) {
-      this.player.takeDamage(contactTriggered ? zombie.explosionDamage : Math.round(zombie.explosionDamage * 0.7))
+      this.hurtPlayer(contactTriggered ? zombie.explosionDamage : Math.round(zombie.explosionDamage * 0.7), true)
     }
 
     this.entryPoints.forEach((entry) => {
@@ -2748,11 +3249,9 @@ export default class GameScene extends Phaser.Scene {
       }
 
       if (Phaser.Math.Distance.Between(x, y, entry.barricade.x, entry.barricade.y) <= zombie.explosionRadius) {
-        entry.barricade.takeDamage(Math.round(zombie.explosionDamage * 0.8))
+        this.strikeBarricade(entry.barricade, Math.round(zombie.explosionDamage * 0.8))
       }
     })
-
-    this.updateBarricadeHud()
   }
 
   private damagePlayerOnContact(zombie: Zombie, time: number) {
@@ -2771,42 +3270,38 @@ export default class GameScene extends Phaser.Scene {
       const deathY = zombie.y
       zombie.destroy()
       this.triggerExploderBurst(zombie, deathX, deathY, true)
-      this.spawnZombieDeathEffect(deathX, deathY)
-      this.cameras.main.shake(110, 0.006)
-      this.updateHealthBar()
-
-      if (this.player.health <= 0) {
-        this.endGame()
-      }
-
+      this.spawnZombieDeathEffect(deathX, deathY, 0xff8c1a, 1.2)
+      this.playSound('zombieDeath')
       return
     }
 
-    this.player.takeDamage(zombie.damage)
-    this.updateHealthBar()
-
-    if (this.player.health <= 0) {
-      this.endGame()
-    }
+    this.hurtPlayer(zombie.damage)
   }
 
   private updateHealthBar() {
     const healthPercent = Phaser.Math.Clamp(this.player.health / this.player.maxHealth, 0, 1)
-    this.healthFill.width = 200 * healthPercent
+    this.healthFill.width = this.healthBarMaxWidth * healthPercent
     this.healthFill.fillColor = healthPercent > 0.35 ? 0x2ecc71 : 0xe74c3c
     this.healthText.setText(`HP ${Math.ceil(this.player.health)}`)
   }
 
   private endGame() {
+    if (this.isGameOver) {
+      return
+    }
+
     if (this.isPaused) {
       this.togglePause()
     }
 
+    this.isGameOver = true
+    this.playSound('gameOver')
+
     this.hideShop()
     this.waveSpawnTimer?.remove(false)
     this.waveSpawnTimer = undefined
-    this.isGameOver = true
     this.skipRoundButton?.setVisible(false)
+    this.setTouchActionButtonsVisible(false)
     this.player.setVelocity(0, 0)
 
     this.zombies.children.each((child) => {
@@ -2829,13 +3324,14 @@ export default class GameScene extends Phaser.Scene {
     if (askForInitials) {
       this.initials = loadLastInitials().split('')
       this.initialsCursor = 0
-      items.push(this.add.rectangle(0, 0, 480, 360, 0x000000, 0.82))
+      const compact = this.isCompactMenu()
+      items.push(this.add.rectangle(0, 0, compact ? 360 : 480, compact ? 400 : 360, 0x000000, 0.82))
       items.push(
         this.add
-          .text(0, -138, 'GAME OVER', {
+          .text(0, compact ? -150 : -138, 'GAME OVER', {
             color: '#ff5555',
             fontFamily: 'Arial',
-            fontSize: '46px',
+            fontSize: compact ? 32 : 46,
             fontStyle: 'bold',
           })
           .setOrigin(0.5),
@@ -2916,13 +3412,14 @@ export default class GameScene extends Phaser.Scene {
       this.refreshInitialsLetterDisplay()
       this.input.keyboard?.on('keydown', this.handleInitialsKeydown, this)
     } else {
-      items.push(this.add.rectangle(0, 0, 460, 320, 0x000000, 0.82))
+      const compact = this.isCompactMenu()
+      items.push(this.add.rectangle(0, 0, compact ? 360 : 460, compact ? 380 : 320, 0x000000, 0.82))
       items.push(
         this.add
-          .text(0, -118, 'GAME OVER', {
+          .text(0, compact ? -140 : -118, 'GAME OVER', {
             color: '#ff5555',
             fontFamily: 'Arial',
-            fontSize: '46px',
+            fontSize: compact ? 32 : 46,
             fontStyle: 'bold',
           })
           .setOrigin(0.5),
@@ -3103,15 +3600,12 @@ export default class GameScene extends Phaser.Scene {
 
   private handleResize(gameSize: Phaser.Structs.Size) {
     this.physics.world.setBounds(0, 0, gameSize.width, gameSize.height)
-    this.pauseButton?.setPosition(gameSize.width - 20, 20)
-    this.timerText?.setPosition(gameSize.width - 20, 58)
-    this.skipRoundButton?.setPosition(gameSize.width - 20, 94)
-    this.highScoreText?.setPosition(gameSize.width - 20, 134)
-    this.updateTouchJoystickPosition(gameSize)
-    this.messageText?.setPosition(gameSize.width / 2, 34)
-    this.repairHintText?.setPosition(gameSize.width / 2, gameSize.height - 72)
+    this.layoutHud()
+    this.layoutTouchControls(gameSize)
+    if (this.startOverlay) {
+      this.showStartScreen()
+    }
     this.pauseOverlay?.setPosition(gameSize.width / 2, gameSize.height / 2)
-    this.startOverlay?.setPosition(gameSize.width / 2, gameSize.height / 2)
     this.lobbyOverlay?.setPosition(gameSize.width / 2, gameSize.height / 2)
     this.shopOverlay?.setPosition(gameSize.width / 2, gameSize.height / 2)
     this.gameOverOverlay?.setPosition(gameSize.width / 2, gameSize.height / 2)

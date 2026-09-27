@@ -8,6 +8,8 @@ export default class Barricade extends Phaser.GameObjects.Rectangle {
   private healthBarBg: Phaser.GameObjects.Rectangle
   private healthBarFill: Phaser.GameObjects.Rectangle
   private healthBarWidth: number
+  private urgentTween?: Phaser.Tweens.Tween
+  private hitFlash?: Phaser.Time.TimerEvent
 
   constructor(scene: Phaser.Scene, x: number, y: number, width: number, height: number) {
     super(scene, x, y, width, height, 0x8b5a2b, 1)
@@ -40,6 +42,21 @@ export default class Barricade extends Phaser.GameObjects.Rectangle {
 
     this.health = Math.max(0, this.health - amount)
     this.updateVisuals()
+    this.flashAttack()
+  }
+
+  flashAttack() {
+    if (!this.active || !this.isAlive) {
+      return
+    }
+
+    this.fillColor = 0xffc857
+    this.hitFlash?.remove(false)
+    this.hitFlash = this.scene.time.delayedCall(80, () => {
+      if (this.active) {
+        this.updateVisuals()
+      }
+    })
   }
 
   repair(amount: number) {
@@ -79,9 +96,13 @@ export default class Barricade extends Phaser.GameObjects.Rectangle {
     this.healthBarFill.width = (this.healthBarWidth - 4) * healthPercent
     this.healthBarFill.x = this.x - ((this.healthBarWidth - 4) - this.healthBarFill.width) / 2
 
+    const urgent = this.isAlive && healthPercent <= 0.35
+
     if (!this.isAlive) {
+      this.stopUrgentPulse()
       this.fillColor = 0x2b2b2b
       this.setAlpha(0.35)
+      this.setStrokeStyle(2, 0x3b2413)
       this.healthBarBg.setVisible(false)
       this.healthBarFill.setVisible(false)
       this.disableCollision()
@@ -89,13 +110,42 @@ export default class Barricade extends Phaser.GameObjects.Rectangle {
     }
 
     this.enableCollision()
-    this.setAlpha(1)
-    this.fillColor = healthPercent > 0.4 ? 0x8b5a2b : 0xb85c38
+    this.fillColor = urgent ? 0xe74c3c : 0x8b5a2b
+    this.setStrokeStyle(urgent ? 4 : 2, urgent ? 0xff6b3d : 0x3b2413)
+    this.healthBarFill.fillColor = urgent ? 0xe74c3c : 0x2ecc71
     this.healthBarBg.setVisible(true)
     this.healthBarFill.setVisible(true)
+    this.syncUrgentPulse(urgent)
+  }
+
+  private syncUrgentPulse(urgent: boolean) {
+    if (!urgent) {
+      this.stopUrgentPulse()
+      this.setAlpha(1)
+      return
+    }
+
+    if (this.urgentTween) {
+      return
+    }
+
+    this.urgentTween = this.scene.tweens.add({
+      targets: this,
+      alpha: 0.55,
+      duration: 280,
+      yoyo: true,
+      repeat: -1,
+    })
+  }
+
+  private stopUrgentPulse() {
+    this.urgentTween?.stop()
+    this.urgentTween = undefined
   }
 
   destroy(fromScene?: boolean) {
+    this.hitFlash?.remove(false)
+    this.stopUrgentPulse()
     this.healthBarBg.destroy()
     this.healthBarFill.destroy()
     super.destroy(fromScene)
