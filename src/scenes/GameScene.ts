@@ -5,7 +5,6 @@ import { rollWaveModifier, type WaveModifier } from '../config/waveModifiers'
 import {
   buildShareText,
   formatBestHighScoreLabel,
-  formatHighScoreBoard,
   formatPersonalBestLabel,
   formatPointsShortOfBoard,
   formatScore,
@@ -155,6 +154,7 @@ export default class GameScene extends Phaser.Scene {
   private startBoardText?: Phaser.GameObjects.Text
   private startSourceText?: Phaser.GameObjects.Text
   private startPersonalText?: Phaser.GameObjects.Text
+  private startSoundButton?: Phaser.GameObjects.Text
   private scoreSource: 'loading' | 'live' | 'cache' = 'loading'
   private personalBestAtStart = loadPersonalBest()
   private runIsPersonalBest = false
@@ -826,132 +826,208 @@ export default class GameScene extends Phaser.Scene {
     this.startOverlay?.destroy()
 
     const compact = this.isCompactMenu()
-    const centerX = this.scale.width / 2
-    const centerY = this.scale.height / 2
-    const panel = this.add.rectangle(0, 0, compact ? 360 : 680, compact ? 640 : 660, 0x000000, 0.94)
+    const panelWidth = Math.min(compact ? 360 : 640, Math.max(300, this.scale.width - 28))
+    const padX = compact ? 22 : 36
+    const gap = compact ? 10 : 14
+    const content: Phaser.GameObjects.GameObject[] = []
+    let cursor = 0
+
+    const place = (object: Phaser.GameObjects.Text, spaceAfter = gap) => {
+      object.setY(cursor)
+      cursor += object.height + spaceAfter
+      content.push(object)
+      return object
+    }
+
     const title = this.add
-      .text(0, compact ? -292 : -300, 'FINAL DAYZ', {
+      .text(0, 0, 'FINAL DAYZ', {
         color: '#ff5555',
         fontFamily: 'Arial',
-        fontSize: compact ? 32 : 52,
+        fontSize: compact ? '34px' : '54px',
         fontStyle: 'bold',
       })
-      .setOrigin(0.5)
-    const instructions = this.add
-      .text(0, compact ? -236 : -230, this.getStartInstructions(), {
-        align: 'center',
-        color: '#ffffff',
+      .setOrigin(0.5, 0)
+    place(title, compact ? 6 : 8)
+
+    const subtitle = this.add
+      .text(0, 0, 'Hold the box. Survive the waves.', {
+        color: '#d9c2c2',
         fontFamily: 'Arial',
-        fontSize: compact ? 14 : 18,
-        lineSpacing: compact ? 4 : 6,
+        fontSize: compact ? '14px' : '16px',
       })
-      .setOrigin(0.5)
+      .setOrigin(0.5, 0)
+    place(subtitle, compact ? 16 : 22)
+
+    const singlePlayerButton = this.createStartMenuButton(0, 0, 'Single Player', 0x2ecc71, () => this.startGame('singlePlayer'))
+    singlePlayerButton.setOrigin(0.5, 0)
+    place(singlePlayerButton, compact ? 14 : 18)
+
     this.startHighScoreLabel = this.add
-      .text(0, compact ? -168 : -150, formatBestHighScoreLabel(), {
+      .text(0, 0, formatBestHighScoreLabel(), {
         color: '#fff2a8',
         fontFamily: 'Arial',
-        fontSize: compact ? 18 : 24,
+        fontSize: compact ? '18px' : '22px',
         fontStyle: 'bold',
       })
-      .setOrigin(0.5)
+      .setOrigin(0.5, 0)
+    place(this.startHighScoreLabel, 2)
+
     this.startPersonalText = this.add
-      .text(0, compact ? -142 : -118, formatPersonalBestLabel(), {
-        color: '#d9e8d9',
-        fontFamily: 'Arial',
-        fontSize: compact ? 13 : 16,
-      })
-      .setOrigin(0.5)
-    this.startBoardText = this.add
-      .text(0, compact ? -78 : -40, this.formatStartBoard(), {
-        align: 'center',
-        color: '#fff2a8',
-        fontFamily: 'Arial',
-        fontSize: compact ? 15 : 18,
-        lineSpacing: 4,
-      })
-      .setOrigin(0.5)
-    this.startSourceText = this.add
-      .text(0, compact ? -8 : 48, this.formatScoreSourceNote(), {
+      .text(0, 0, formatPersonalBestLabel(), {
         color: '#8d9794',
         fontFamily: 'Arial',
-        fontSize: compact ? 13 : 14,
+        fontSize: compact ? '13px' : '14px',
       })
-      .setOrigin(0.5)
-    const buttonY = compact ? 40 : 100
-    const buttonGap = compact ? 52 : 58
-    const singlePlayerButton = this.createStartMenuButton(0, buttonY, 'Single Player', 0x2ecc71, () => this.startGame('singlePlayer'))
-    const menuItems: Phaser.GameObjects.GameObject[] = [
-      panel,
-      title,
-      instructions,
-      this.startHighScoreLabel,
-      this.startPersonalText,
-      this.startBoardText,
-      this.startSourceText,
-      singlePlayerButton,
-    ]
+      .setOrigin(0.5, 0)
+    place(this.startPersonalText, compact ? 14 : 18)
+
+    const columnTop = cursor
+    const left = -panelWidth / 2 + padX
+    const columnWidth = (panelWidth - padX * 2 - (compact ? 0 : 28)) / (compact ? 1 : 2)
+    const leaderHeading = this.add
+      .text(left, 0, 'LEADERBOARD', {
+        color: '#fff2a8',
+        fontFamily: 'Arial',
+        fontSize: compact ? '13px' : '14px',
+        fontStyle: 'bold',
+      })
+      .setOrigin(0, 0)
+    leaderHeading.setY(columnTop)
+    content.push(leaderHeading)
+
+    this.startBoardText = this.add
+      .text(left, 0, this.formatStartBoard(), {
+        align: 'left',
+        color: '#fff2a8',
+        fontFamily: 'Courier New',
+        fontSize: compact ? '15px' : '16px',
+        lineSpacing: 5,
+      })
+      .setOrigin(0, 0)
+    this.startBoardText.setY(columnTop + leaderHeading.height + 6)
+    content.push(this.startBoardText)
+
+    this.startSourceText = this.add
+      .text(left, 0, this.formatScoreSourceNote(), {
+        color: '#6f7874',
+        fontFamily: 'Arial',
+        fontSize: '12px',
+      })
+      .setOrigin(0, 0)
+    const sourceGap = this.startSourceText.text ? 4 : 0
+    const boardHeight = Math.max(this.startBoardText.height, this.startBoardText.text.split('\n').length * (compact ? 22 : 24))
+    this.startSourceText.setY(this.startBoardText.y + boardHeight + sourceGap)
+    content.push(this.startSourceText)
+
+    const controlsX = compact ? left : panelWidth / 2 - padX - columnWidth
+    const controls = this.add
+      .text(controlsX, 0, this.getMenuControls(), {
+        align: 'left',
+        color: '#f5f5f5',
+        fontFamily: 'Arial',
+        fontSize: compact ? '14px' : '15px',
+        lineSpacing: 4,
+      })
+      .setOrigin(0, 0)
+    const controlsHeading = this.add
+      .text(controls.x, 0, 'CONTROLS', {
+        color: '#fff2a8',
+        fontFamily: 'Arial',
+        fontSize: compact ? '13px' : '14px',
+        fontStyle: 'bold',
+      })
+      .setOrigin(0, 0)
+    const controlsTop = compact ? this.startSourceText.y + this.startSourceText.height + 14 : columnTop
+    controlsHeading.setY(controlsTop)
+    controls.setY(controlsTop + controlsHeading.height + 6)
+    content.push(controlsHeading, controls)
+
+    const controlsHeight = Math.max(controls.height, controls.text.split('\n').length * (compact ? 20 : 22))
+    cursor = Math.max(this.startSourceText.y + this.startSourceText.height, controls.y + controlsHeight) + (compact ? 14 : 18)
 
     if (this.coopDebug) {
-      menuItems.push(this.createStartMenuButton(0, buttonY + buttonGap, 'Create Co-op Room', 0x4aa3ff, () => this.createCoopRoom()))
-      menuItems.push(this.createStartMenuButton(0, buttonY + buttonGap * 2, 'Join Co-op Room', 0xffc857, () => this.promptJoinCoopRoom()))
+      const createRoomButton = this.createStartMenuButton(0, 0, 'Create Co-op Room', 0x4aa3ff, () => this.createCoopRoom())
+      createRoomButton.setOrigin(0.5, 0)
+      createRoomButton.setY(cursor)
+      cursor += createRoomButton.height + 8
+      const joinRoomButton = this.createStartMenuButton(0, 0, 'Join Co-op Room', 0xffc857, () => this.promptJoinCoopRoom())
+      joinRoomButton.setOrigin(0.5, 0)
+      joinRoomButton.setY(cursor)
+      cursor += joinRoomButton.height + 8
       this.multiplayerStatusText = this.add
-        .text(0, buttonY + buttonGap * 3 + 8, status, {
+        .text(0, cursor, status, {
           align: 'center',
           color: '#fff2a8',
           fontFamily: 'Arial',
-          fontSize: compact ? 14 : 18,
-          stroke: '#000000',
-          strokeThickness: 3,
-          wordWrap: { width: compact ? 320 : 520 },
+          fontSize: '14px',
+          wordWrap: { width: panelWidth - padX * 2 },
         })
-        .setOrigin(0.5)
-      menuItems.push(this.multiplayerStatusText)
+        .setOrigin(0.5, 0)
+      cursor += Math.max(18, this.multiplayerStatusText.height) + gap
+      content.push(createRoomButton, joinRoomButton, this.multiplayerStatusText)
     } else {
       this.multiplayerStatusText = undefined
-      menuItems.push(
-        this.add
-          .text(0, buttonY + buttonGap + 6, 'Co-op coming soon', {
-            align: 'center',
-            color: '#8d9794',
-            fontFamily: 'Arial',
-            fontSize: compact ? 18 : 22,
-            fontStyle: 'bold',
-          })
-          .setOrigin(0.5),
-      )
-      menuItems.push(
-        this.add
-          .text(0, buttonY + buttonGap + (compact ? 28 : 34), 'Online co-op is being rebuilt for smoother play.', {
-            align: 'center',
-            color: '#6f7874',
-            fontFamily: 'Arial',
-            fontSize: compact ? 13 : 15,
-          })
-          .setOrigin(0.5),
-      )
-      menuItems.push(
-        this.add
-          .text(0, buttonY + buttonGap + (compact ? 58 : 68), 'Daily Challenge coming soon', {
-            align: 'center',
-            color: '#6f7874',
-            fontFamily: 'Arial',
-            fontSize: compact ? 14 : 16,
-          })
-          .setOrigin(0.5),
-      )
+      const comingSoon = this.add
+        .text(0, cursor, 'Co-op coming soon    ·    Daily Challenge coming soon', {
+          align: 'center',
+          color: '#6f7874',
+          fontFamily: 'Arial',
+          fontSize: compact ? '12px' : '13px',
+          wordWrap: { width: panelWidth - padX * 2 },
+        })
+        .setOrigin(0.5, 0)
+      cursor += comingSoon.height + (compact ? 12 : 14)
+      content.push(comingSoon)
     }
 
-    this.startOverlay = this.add.container(centerX, centerY, menuItems)
-    this.startOverlay.setDepth(10)
+    this.startSoundButton = this.add
+      .text(0, cursor, this.audio.muted ? 'Muted' : 'Sound', {
+        align: 'center',
+        backgroundColor: '#20262b',
+        color: '#d9e8d9',
+        fixedWidth: 92,
+        fontFamily: 'Arial',
+        fontSize: '14px',
+        fontStyle: 'bold',
+        padding: { x: 8, y: 8 },
+      })
+      .setOrigin(0.5, 0)
+      .setInteractive({ useHandCursor: true })
+    this.startSoundButton.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+      pointer.event.stopPropagation()
+      this.audio.unlock()
+      const muted = this.audio.toggleMute()
+      const label = muted ? 'Muted' : 'Sound'
+      this.startSoundButton?.setText(label)
+      this.muteButton?.setText(label)
+    })
+    cursor += this.startSoundButton.height
+    content.push(this.startSoundButton)
+
+    const panelHeight = Math.min(cursor + (compact ? 40 : 48), this.scale.height - 24)
+    const panel = this.add.graphics()
+    panel.fillStyle(0x070809, 0.9)
+    panel.lineStyle(2, 0x5a3030, 0.85)
+    panel.fillRoundedRect(-panelWidth / 2, 0, panelWidth, panelHeight, 14)
+    panel.strokeRoundedRect(-panelWidth / 2, 0, panelWidth, panelHeight, 14)
+    const shift = (this.scale.height - panelHeight) / 2
+    const veil = this.add.rectangle(0, this.scale.height / 2 - shift, this.scale.width + 8, this.scale.height + 8, 0x000000, 0.45)
+    content.forEach((object) => {
+      const positioned = object as unknown as { y: number }
+      positioned.y += compact ? 16 : 20
+    })
+
+    this.startOverlay = this.add.container(this.scale.width / 2, shift, [veil, panel, ...content])
+    this.startOverlay.setDepth(30)
     this.layoutHud()
   }
 
-  private getStartInstructions() {
+  private getMenuControls() {
     if (this.useTouchControls) {
-      return 'Left stick to move\nRight pad to aim and fire\nWeapon cycles guns\nRepair fixes nearby barricades'
+      return 'Left stick move\nRight pad aim and fire\nWeapon cycles guns\nRepair fixes doors\nMelee shove'
     }
 
-    return 'WASD to move\nMouse to aim\nHold left click to shoot\n1/2/3 switch weapons\nE repairs damaged barricades'
+    return 'WASD move\nMouse aim\nHold click shoot\nE repair\n1–4 weapons\nTools: Q / T / Space'
   }
 
   private createStartMenuButton(x: number, y: number, label: string, backgroundColor: number, onClick: () => void) {
@@ -988,6 +1064,7 @@ export default class GameScene extends Phaser.Scene {
     this.startBoardText = undefined
     this.startSourceText = undefined
     this.startPersonalText = undefined
+    this.startSoundButton = undefined
     this.multiplayerStatusText = undefined
     this.layoutHud()
     this.setTouchActionButtonsVisible(true)
@@ -1102,6 +1179,7 @@ export default class GameScene extends Phaser.Scene {
     this.startBoardText = undefined
     this.startSourceText = undefined
     this.startPersonalText = undefined
+    this.startSoundButton = undefined
     this.multiplayerStatusText = undefined
     this.lobbyOverlay?.destroy()
 
@@ -1874,15 +1952,16 @@ export default class GameScene extends Phaser.Scene {
     this.timerText.setPosition(right, top + 48)
     this.skipRoundButton.setPosition(right, top + 84)
     this.highScoreText.setPosition(right, top + (narrow ? 128 : 134))
-    this.highScoreText.setVisible(!narrow)
+    this.highScoreText.setVisible(!hideCombatHud && !narrow)
     if (this.startOverlay) {
-      this.muteButton?.setOrigin(0.5, 1)
-      this.muteButton?.setPosition(this.scale.width / 2, this.scale.height - Math.max(16, inset.bottom + 8))
+      this.muteButton?.setVisible(false)
     } else if (this.shopOverlay || this.perkOverlay) {
+      this.muteButton?.setVisible(true)
       this.muteButton?.setOrigin(0, 1)
       this.muteButton?.setPosition(left, this.scale.height - Math.max(8, inset.bottom + 4))
       this.skipRoundButton?.setVisible(false)
     } else {
+      this.muteButton?.setVisible(true)
       this.muteButton?.setOrigin(1, 0)
       this.muteButton?.setPosition(right, top + (narrow ? 128 : 168))
     }
@@ -4313,7 +4392,14 @@ export default class GameScene extends Phaser.Scene {
       return 'Loading scores…'
     }
 
-    return formatHighScoreBoard(loadHighScores())
+    const entries = loadHighScores()
+    if (entries.length === 0) {
+      return 'No scores yet'
+    }
+
+    return entries
+      .map((entry, index) => `${index + 1}  ${entry.initials}   ${formatScore(entry.score).padStart(7, ' ')}`)
+      .join('\n')
   }
 
   private formatScoreSourceNote() {
