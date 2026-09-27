@@ -6,6 +6,7 @@ export const waveConfig = {
   minSpawnDelayMs: 260,
   zombieHealthPerWave: 10,
   zombieSpeedPerWave: 4,
-  waveBonusBase: 50,
-  waveBonusPerWave: 10,
+  cashPerKill: 12,
+  waveBonusBase: 55,
+  waveBonusPerWave: 12,
 }

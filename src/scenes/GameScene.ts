@@ -10,6 +10,7 @@ import {
   scoreQualifiesForHighScore,
 } from '../config/highScores'
 import { persistHighScore, syncHighScoresFromServer } from '../network/highScoreClient'
+import { getPerk, rollPerkChoices, PERK_WAVE_INTERVAL, type PerkConfig, type PerkId } from '../config/perks'
 import { shopConfig, shopUpgradeConfig, shopWeaponUnlocks, type ShopItemId } from '../config/shop'
 import { waveConfig } from '../config/waves'
 import { defaultWeaponId, type WeaponConfig, type WeaponId, weapons } from '../config/weapons'
@@ -114,6 +115,7 @@ export default class GameScene extends Phaser.Scene {
   private weaponText!: Phaser.GameObjects.Text
   private ownedWeaponsText!: Phaser.GameObjects.Text
   private barricadeText!: Phaser.GameObjects.Text
+  private perkText!: Phaser.GameObjects.Text
   private multiplayerText!: Phaser.GameObjects.Text
   private messageText!: Phaser.GameObjects.Text
   private repairHintText!: Phaser.GameObjects.Text
@@ -135,6 +137,10 @@ export default class GameScene extends Phaser.Scene {
   private lobbyStatusText?: Phaser.GameObjects.Text
   private lobbyStartButton?: Phaser.GameObjects.Text
   private shopOverlay?: Phaser.GameObjects.Container
+  private shopStatusText?: Phaser.GameObjects.Text
+  private shopLabels = new Map<ShopItemId, Phaser.GameObjects.Text>()
+  private perkOverlay?: Phaser.GameObjects.Container
+  private pendingPerkChoices?: PerkConfig[]
   private gameOverOverlay?: Phaser.GameObjects.Container
   private initialsLetterTexts: Phaser.GameObjects.Text[] = []
   private isEnteringInitials = false
@@ -151,6 +157,16 @@ export default class GameScene extends Phaser.Scene {
   private currentWeaponId: WeaponId = defaultWeaponId
   private ownedWeapons = new Set<WeaponId>([defaultWeaponId])
   private damageBonus = 0
+  private damageUpgradeLevel = 0
+  private maxHealthUpgradeLevel = 0
+  private ownedPerks: PerkId[] = []
+  private perkWavesHandled = new Set<number>()
+  private zombiesKilled = 0
+  private cashEarned = 0
+  private repairsDone = 0
+  private lastWaveBonus = 0
+  private lastShopFailAt = 0
+  private readonly basePlayerSpeed = 260
   private zombiesToSpawn = 0
   private spawnDelay = 900
   private lastShotAt = 0
@@ -471,6 +487,7 @@ export default class GameScene extends Phaser.Scene {
     this.weaponText = this.add.text(20, 138, `Weapon ${this.currentWeapon.name}`, this.hudTextStyle())
     this.ownedWeaponsText = this.add.text(20, 166, this.getOwnedWeaponsLabel(), this.smallHudTextStyle())
     this.barricadeText = this.add.text(20, 190, this.getBarricadeStatusLabel(), this.smallHudTextStyle())
+    this.perkText = this.add.text(20, 214, '', this.smallHudTextStyle())
     this.multiplayerText = this.add.text(20, 214, '', this.smallHudTextStyle())
     this.messageText = this.add.text(this.scale.width / 2, 34, '', {
       align: 'center',
@@ -1664,7 +1681,7 @@ export default class GameScene extends Phaser.Scene {
   }
 
   private isBlockingOverlayOpen() {
-    return Boolean(this.startOverlay || this.shopOverlay || this.lobbyOverlay || this.gameOverOverlay || this.isPaused)
+    return Boolean(this.startOverlay || this.shopOverlay || this.perkOverlay || this.lobbyOverlay || this.gameOverOverlay || this.isPaused)
   }
 
   private getSafeInsets() {
@@ -1678,7 +1695,7 @@ export default class GameScene extends Phaser.Scene {
   }
 
   private setTouchActionButtonsVisible(visible: boolean) {
-    const showWeapon = visible && this.useTouchControls && this.isStarted && !this.isGameOver
+    const showWeapon = visible && this.useTouchControls && this.isStarted && !this.isGameOver && !this.shopOverlay && !this.perkOverlay
     const showRepair = showWeapon && this.gameMode === 'singlePlayer'
     this.touchWeaponButton?.setVisible(showWeapon)
     this.touchRepairButton?.setVisible(showRepair)
@@ -1713,13 +1730,27 @@ export default class GameScene extends Phaser.Scene {
     this.weaponText.setPosition(left, top + 30 + line * 3)
     this.ownedWeaponsText.setPosition(left, top + 30 + line * 4)
     this.barricadeText.setPosition(left, top + 30 + line * 5)
-    this.multiplayerText.setPosition(left, top + 30 + line * 6)
+    this.perkText.setPosition(left, top + 30 + line * 6)
+    this.perkText.setWordWrapWidth(narrow ? 160 : 260)
+    this.multiplayerText.setPosition(left, top + 30 + line * 7)
     this.waveText.setFontSize(narrow ? 14 : 20)
     this.scoreText.setFontSize(narrow ? 14 : 20)
     this.cashText.setFontSize(narrow ? 14 : 20)
     this.weaponText.setFontSize(narrow ? 14 : 20)
-    this.ownedWeaponsText.setVisible(!narrow)
-    this.barricadeText.setVisible(!narrow)
+    const hideCombatHud = Boolean(this.shopOverlay || this.perkOverlay)
+    this.healthBarBg.setVisible(!hideCombatHud)
+    this.healthFill.setVisible(!hideCombatHud)
+    this.healthText.setVisible(!hideCombatHud)
+    this.waveText.setVisible(!hideCombatHud)
+    this.scoreText.setVisible(!hideCombatHud)
+    this.cashText.setVisible(!hideCombatHud)
+    this.weaponText.setVisible(!hideCombatHud)
+    this.timerText.setVisible(!hideCombatHud)
+    this.highScoreText.setVisible(!hideCombatHud && !narrow)
+    this.ownedWeaponsText.setVisible(!hideCombatHud && !narrow)
+    this.barricadeText.setVisible(!hideCombatHud && !narrow)
+    this.perkText.setVisible(!hideCombatHud && !narrow && this.ownedPerks.length > 0)
+    this.refreshPerkHud()
 
     this.pauseButton.setPosition(right, top)
     this.timerText.setPosition(right, top + 48)
@@ -1729,11 +1760,16 @@ export default class GameScene extends Phaser.Scene {
     if (this.startOverlay) {
       this.muteButton?.setOrigin(0.5, 1)
       this.muteButton?.setPosition(this.scale.width / 2, this.scale.height - Math.max(16, inset.bottom + 8))
+    } else if (this.shopOverlay || this.perkOverlay) {
+      this.muteButton?.setOrigin(0, 1)
+      this.muteButton?.setPosition(left, this.scale.height - Math.max(8, inset.bottom + 4))
+      this.skipRoundButton?.setVisible(false)
     } else {
       this.muteButton?.setOrigin(1, 0)
       this.muteButton?.setPosition(right, top + (narrow ? 128 : 168))
     }
-    this.messageText.setPosition(this.scale.width / 2, Math.max(top + 96, this.scale.height * 0.16))
+    const messageY = this.shopOverlay || this.perkOverlay ? this.scale.height * 0.7 : Math.max(top + 96, this.scale.height * 0.16)
+    this.messageText.setPosition(this.scale.width / 2, messageY)
     this.messageText.setWordWrapWidth(Math.max(220, this.scale.width * 0.7))
     this.damageFlash?.setPosition(this.scale.width / 2, this.scale.height / 2)
     this.damageFlash?.setSize(this.scale.width, this.scale.height)
@@ -1760,6 +1796,9 @@ export default class GameScene extends Phaser.Scene {
 
   private updateCash(amount: number) {
     this.cash += amount
+    if (amount > 0) {
+      this.cashEarned += amount
+    }
     this.cashText.setText(`Cash $${this.cash}`)
   }
 
@@ -1875,12 +1914,13 @@ export default class GameScene extends Phaser.Scene {
     })
   }
 
-  private hurtPlayer(amount: number, heavy = false) {
+  private hurtPlayer(amount: number, heavy = false, contact = false) {
     if (amount <= 0 || this.isGameOver) {
       return
     }
 
-    this.player.takeDamage(amount)
+    const dealt = contact && this.hasPerk('thickSkin') ? Math.max(1, Math.round(amount * 0.9)) : amount
+    this.player.takeDamage(dealt)
     this.player.setTint(0xff6666)
     this.time.delayedCall(90, () => {
       if (this.player.active) {
@@ -2020,8 +2060,8 @@ export default class GameScene extends Phaser.Scene {
   private updateRepairInteraction() {
     const repairTarget = this.getNearbyDamagedBarricade()
     const hint = this.useTouchControls
-      ? `Tap Repair ($${barricadeConfig.repairCost})`
-      : `Press E to repair ($${barricadeConfig.repairCost})`
+      ? `Tap Repair ($${this.getRepairCost()})`
+      : `Press E to repair ($${this.getRepairCost()})`
     this.repairHintText.setText(repairTarget ? hint : '')
 
     if (!repairTarget || !Phaser.Input.Keyboard.JustDown(this.keys.E)) {
@@ -2043,11 +2083,12 @@ export default class GameScene extends Phaser.Scene {
       return
     }
 
-    if (!this.spendCash(barricadeConfig.repairCost)) {
+    if (!this.spendCash(this.getRepairCost())) {
       return
     }
 
-    repairTarget.repair(barricadeConfig.repairAmount)
+    repairTarget.repair(this.getRepairAmount())
+    this.repairsDone += 1
     this.rebuildNavigationGrid()
     this.invalidateZombiePaths()
     this.updateBarricadeHud()
@@ -2086,8 +2127,10 @@ export default class GameScene extends Phaser.Scene {
     const spawnOffset = 28
     const baseAngle = Math.atan2(direction.y, direction.x)
     const spreadRadians = Phaser.Math.DegToRad(weapon.spreadDegrees)
-    const firstShotOffset = weapon.bulletsPerShot > 1 ? -spreadRadians / 2 : 0
-    const angleStep = weapon.bulletsPerShot > 1 ? spreadRadians / (weapon.bulletsPerShot - 1) : 0
+    const pelletCount = this.getPelletCount(weapon)
+    const shotDamage = this.getShotDamage(weapon)
+    const firstShotOffset = pelletCount > 1 ? -spreadRadians / 2 : 0
+    const angleStep = pelletCount > 1 ? spreadRadians / (pelletCount - 1) : 0
 
     const muzzleRadius = weapon.id === 'shotgun' ? 14 : weapon.id === 'smg' ? 5 : 8
     this.createMuzzleFlash(this.player.x, this.player.y, baseAngle, weapon.id === 'shotgun' ? 0xffe08a : 0xfff2a8, muzzleRadius)
@@ -2104,13 +2147,13 @@ export default class GameScene extends Phaser.Scene {
       return
     }
 
-    for (let i = 0; i < weapon.bulletsPerShot; i += 1) {
-      const randomSpread = weapon.bulletsPerShot === 1 ? Phaser.Math.FloatBetween(-spreadRadians / 2, spreadRadians / 2) : 0
+    for (let i = 0; i < pelletCount; i += 1) {
+      const randomSpread = pelletCount === 1 ? Phaser.Math.FloatBetween(-spreadRadians / 2, spreadRadians / 2) : 0
       const shotAngle = baseAngle + firstShotOffset + angleStep * i + randomSpread
       const shotDirection = new Phaser.Math.Vector2(Math.cos(shotAngle), Math.sin(shotAngle))
       const muzzleX = this.player.x + shotDirection.x * spawnOffset
       const muzzleY = this.player.y + shotDirection.y * spawnOffset
-      const bullet = new Bullet(this, muzzleX, muzzleY, weapon.damage + this.damageBonus, weapon.bulletSpeed, weapon.id)
+      const bullet = new Bullet(this, muzzleX, muzzleY, shotDamage, weapon.bulletSpeed, weapon.id)
 
       this.bullets.add(bullet)
       bullet.launch(shotDirection.x, shotDirection.y)
@@ -2155,6 +2198,11 @@ export default class GameScene extends Phaser.Scene {
   }
 
   private startNextWave() {
+    if (this.pendingPerkChoices) {
+      this.showMessage('Choose a perk first', 'warning')
+      return
+    }
+
     this.isIntermission = false
     this.hideShop()
     this.waveSpawnTimer?.remove(false)
@@ -2167,6 +2215,7 @@ export default class GameScene extends Phaser.Scene {
     )
     this.waveText.setText(`Wave ${this.wave}`)
     this.skipRoundButton.setText('Skip Round')
+    this.skipRoundButton.setVisible(this.gameMode === 'singlePlayer')
     if (this.pendingBossEnemyType) {
       this.showWaveBanner('Wave 10: THE WARDEN', '#8eb4ff')
       this.playSound('wardenWarn')
@@ -2181,23 +2230,26 @@ export default class GameScene extends Phaser.Scene {
       callback: this.spawnZombie,
       callbackScope: this,
     })
+    this.setTouchActionButtonsVisible(true)
   }
 
   private completeWave() {
     this.isIntermission = true
     const bonus = this.getWaveBonus(this.wave)
 
+    this.lastWaveBonus = bonus
     this.updateCash(bonus)
-    this.showWaveBanner('Wave Complete')
-    this.showMessage(`Wave bonus +$${bonus}`, 'money')
+    this.waveBanner?.destroy()
+    this.waveBanner = undefined
     this.playSound('waveComplete')
     this.vibrate(18)
     this.skipRoundButton.setText('Next Wave')
-    this.showShop()
+    this.offerPerkOrShop()
   }
 
   private getWaveBonus(wave: number) {
-    return waveConfig.waveBonusBase + wave * waveConfig.waveBonusPerWave
+    const bonus = waveConfig.waveBonusBase + wave * waveConfig.waveBonusPerWave
+    return this.hasPerk('bonusCash') ? Math.round(bonus * 1.25) : bonus
   }
 
   private handleNextRoundClick() {
@@ -2273,9 +2325,10 @@ export default class GameScene extends Phaser.Scene {
 
     this.wave = targetWave - 1
     this.isIntermission = true
+    this.lastWaveBonus = bonus
     this.waveText.setText(`Wave ${this.wave} Complete`)
     this.skipRoundButton.setText('Next Wave')
-    this.showShop()
+    this.offerPerkOrShop()
     this.showMessage(bonus > 0 ? `Skipped to wave ${targetWave} (+$${bonus})` : `Skipped to wave ${targetWave}`)
   }
 
@@ -2305,63 +2358,82 @@ export default class GameScene extends Phaser.Scene {
     this.completeWave()
   }
 
+  private offerPerkOrShop() {
+    const offerPerk = this.wave > 0 && this.wave % PERK_WAVE_INTERVAL === 0 && !this.perkWavesHandled.has(this.wave)
+    const choices = offerPerk ? rollPerkChoices(this.ownedPerks) : []
+
+    if (choices.length > 0) {
+      this.showPerkChoice(choices)
+      return
+    }
+
+    this.showShop()
+  }
+
   private showShop() {
     this.hideShop()
 
+    const compact = this.isCompactMenu()
     const centerX = this.scale.width / 2
     const centerY = this.scale.height / 2
-    const compact = this.isCompactMenu()
-    const panel = this.add.rectangle(0, 0, compact ? 360 : 560, compact ? 600 : 500, 0x000000, 0.82)
+    const panel = this.add.rectangle(0, 0, compact ? 360 : 640, compact ? 640 : 660, 0x000000, 0.86)
     const title = this.add
-      .text(0, compact ? -250 : -210, 'Wave Complete', {
+      .text(0, compact ? -292 : -300, 'Wave Complete', {
         color: '#fff2a8',
         fontFamily: 'Arial',
-        fontSize: compact ? 28 : 38,
+        fontSize: compact ? 28 : 40,
         fontStyle: 'bold',
       })
       .setOrigin(0.5)
-    const subtitle = this.add
-      .text(0, compact ? -206 : -166, 'Buy upgrades, then start the next wave.\nHold or 3-click an upgrade to spend all cash.', {
+    const bonus = this.add
+      .text(0, compact ? -256 : -258, `Wave bonus +$${this.lastWaveBonus}`, {
+        color: '#7dffb3',
+        fontFamily: 'Arial',
+        fontSize: compact ? 16 : 20,
+        fontStyle: 'bold',
+      })
+      .setOrigin(0.5)
+    this.shopStatusText = this.add
+      .text(0, compact ? -196 : -198, this.formatShopStatus(), {
         align: 'center',
         color: '#ffffff',
         fontFamily: 'Arial',
-        fontSize: compact ? 13 : 16,
-        wordWrap: { width: compact ? 320 : 500 },
+        fontSize: compact ? 15 : 16,
+        lineSpacing: 4,
       })
       .setOrigin(0.5)
-    const continueButton = this.createShopButton(0, compact ? 246 : 204, 'Start Next Wave / Enter', () => this.handleNextRoundClick())
-    const items: Phaser.GameObjects.GameObject[] = [panel, title, subtitle, continueButton]
-    const shopEntries: ShopItemId[] = [
-      'healPlayer',
-      'repairAll',
-      'damageUpgrade',
-      'maxHealthUpgrade',
-      'buySmg',
-      'buyShotgun',
-    ]
+    const nextWave = this.wave + 1
+    const continueButton = this.createShopButton(0, compact ? 286 : 292, `Start Wave ${nextWave}`, () => this.handleNextRoundClick(), undefined, '#2ecc71', '#101316')
+    const items: Phaser.GameObjects.GameObject[] = [panel, title, bonus, this.shopStatusText, continueButton]
+    const shopEntries: ShopItemId[] = ['healPlayer', 'repairAll', 'damageUpgrade', 'maxHealthUpgrade', 'buySmg', 'buyShotgun']
+    this.shopLabels.clear()
 
     shopEntries.forEach((itemId, index) => {
-      const item = shopConfig[itemId]
-      const y = (compact ? -148 : -112) + index * (compact ? 40 : 48)
-      items.push(
-        this.createShopButton(
-          0,
-          y,
-          `${item.label} - $${item.cost}`,
-          () => this.handleShopItemClick(itemId),
-          item.repeatable ? () => this.buyMaxShopItem(itemId) : undefined,
-        ),
+      const y = (compact ? -108 : -112) + index * (compact ? 52 : 54)
+      const button = this.createShopButton(
+        0,
+        y,
+        this.formatShopItemLabel(itemId),
+        () => this.handleShopItemClick(itemId),
+        shopConfig[itemId].repeatable ? () => this.buyMaxShopItem(itemId) : undefined,
       )
+      this.shopLabels.set(itemId, button)
+      items.push(button)
     })
 
     this.shopOverlay = this.add.container(centerX, centerY, items)
     this.shopOverlay.setDepth(12)
+    this.refreshShopButtons()
+    this.layoutHud()
+    this.setTouchActionButtonsVisible(true)
   }
 
   private hideShop() {
     this.clearShopHoldTimer()
     this.shopOverlay?.destroy()
     this.shopOverlay = undefined
+    this.shopStatusText = undefined
+    this.shopLabels.clear()
     this.shopButtons = []
   }
 
@@ -2370,16 +2442,25 @@ export default class GameScene extends Phaser.Scene {
     this.shopHoldTimer = undefined
   }
 
-  private createShopButton(x: number, y: number, label: string, onClick: () => void, onHold?: () => void) {
+  private createShopButton(
+    x: number,
+    y: number,
+    label: string,
+    onClick: () => void,
+    onHold?: () => void,
+    backgroundColor = '#20262b',
+    color = '#ffffff',
+  ) {
+    const compact = this.isCompactMenu()
     const button = this.add
       .text(x, y, label, {
         align: 'center',
-        backgroundColor: '#20262b',
-        color: '#ffffff',
-        fixedWidth: this.isCompactMenu() ? 310 : 330,
+        backgroundColor,
+        color,
+        fixedWidth: compact ? 320 : 420,
         fontFamily: 'Arial',
-        fontSize: this.isCompactMenu() ? '15px' : '17px',
-        padding: { x: 12, y: this.isCompactMenu() ? 10 : 8 },
+        fontSize: compact ? '16px' : '18px',
+        padding: { x: 12, y: 12 },
       })
       .setOrigin(0.5)
       .setInteractive({ useHandCursor: true })
@@ -2442,17 +2523,17 @@ export default class GameScene extends Phaser.Scene {
     }
 
     if (itemId === 'damageUpgrade') {
-      this.showMessage(`Damage +${shopUpgradeConfig.damageUpgradeAmount * count}`)
+      this.showMessage('Damage upgraded', 'money')
       return
     }
 
     if (itemId === 'maxHealthUpgrade') {
-      this.showMessage(`Max health +${shopUpgradeConfig.maxHealthUpgradeAmount * count}`)
+      this.showMessage('Max HP upgraded', 'money')
       return
     }
 
     if (itemId === 'healPlayer') {
-      this.showMessage(count === 1 ? 'Player healed' : `Healed ${count} times`)
+      this.showMessage(count === 1 ? 'Healed +45' : `Healed +${shopUpgradeConfig.healAmount * count}`, 'money')
     }
   }
 
@@ -2462,22 +2543,28 @@ export default class GameScene extends Phaser.Scene {
 
     if (weaponUnlock && this.ownedWeapons.has(weaponUnlock)) {
       if (!quiet) {
-        this.showMessage('Already owned')
+        this.denyPurchase('Already owned')
       }
       return false
     }
 
     if (itemId === 'healPlayer' && this.player.health >= this.player.maxHealth) {
       if (!quiet) {
-        this.showMessage('Health already full')
+        this.denyPurchase('Already full HP')
+      }
+      return false
+    }
+
+    if (itemId === 'repairAll' && this.barricades.every((barricade) => barricade.health >= barricade.maxHealth)) {
+      if (!quiet) {
+        this.denyPurchase('Doors already repaired')
       }
       return false
     }
 
     if (this.cash < item.cost) {
       if (!quiet) {
-        this.showMessage('Not enough cash', 'warning')
-        this.playSound('notEnoughCash')
+        this.denyPurchase('Not enough cash')
       }
       return false
     }
@@ -2491,37 +2578,50 @@ export default class GameScene extends Phaser.Scene {
       this.player.health = Math.min(this.player.maxHealth, this.player.health + shopUpgradeConfig.healAmount)
       this.updateHealthBar()
       if (!quiet) {
-        this.showMessage('Player healed')
+        this.showMessage('Healed +45', 'money')
       }
+      this.refreshShopButtons()
       return true
     }
 
     if (itemId === 'repairAll') {
-      this.barricades.forEach((barricade) => barricade.repairFully())
+      let repaired = 0
+      this.barricades.forEach((barricade) => {
+        if (barricade.health < barricade.maxHealth) {
+          repaired += 1
+        }
+        barricade.repairFully()
+      })
+      this.repairsDone += repaired
       this.rebuildNavigationGrid()
       this.invalidateZombiePaths()
       this.updateBarricadeHud()
       if (!quiet) {
-        this.showMessage('Barricades repaired')
+        this.showMessage('All doors repaired', 'money')
       }
+      this.refreshShopButtons()
       return true
     }
 
     if (itemId === 'damageUpgrade') {
       this.damageBonus += shopUpgradeConfig.damageUpgradeAmount
+      this.damageUpgradeLevel += 1
       if (!quiet) {
-        this.showMessage(`Damage +${shopUpgradeConfig.damageUpgradeAmount}`)
+        this.showMessage('Damage upgraded', 'money')
       }
+      this.refreshShopButtons()
       return true
     }
 
     if (itemId === 'maxHealthUpgrade') {
       this.player.maxHealth += shopUpgradeConfig.maxHealthUpgradeAmount
       this.player.health += shopUpgradeConfig.maxHealthUpgradeAmount
+      this.maxHealthUpgradeLevel += 1
       this.updateHealthBar()
       if (!quiet) {
-        this.showMessage(`Max health +${shopUpgradeConfig.maxHealthUpgradeAmount}`)
+        this.showMessage('Max HP upgraded', 'money')
       }
+      this.refreshShopButtons()
       return true
     }
 
@@ -2529,11 +2629,212 @@ export default class GameScene extends Phaser.Scene {
       this.ownedWeapons.add(weaponUnlock)
       this.ownedWeaponsText.setText(this.getOwnedWeaponsLabel())
       if (!quiet) {
-        this.showMessage(`${weapons[weaponUnlock].name} unlocked`)
+        this.showMessage(`${weapons[weaponUnlock].name} unlocked`, 'money')
       }
     }
 
+    this.refreshShopButtons()
     return true
+  }
+
+  private denyPurchase(message: string) {
+    const now = this.time.now
+    if (now - this.lastShopFailAt < 350) {
+      return
+    }
+
+    this.lastShopFailAt = now
+    this.showMessage(message, 'warning')
+    this.playSound('notEnoughCash')
+  }
+
+  private formatShopStatus() {
+    const aliveDoors = this.barricades.filter((barricade) => barricade.isAlive).length
+    const perkNames = this.ownedPerks.map((id) => getPerk(id).name)
+    return [
+      `Cash $${this.cash}`,
+      `HP ${Math.ceil(this.player.health)}/${this.player.maxHealth}`,
+      `Doors ${aliveDoors}/${this.barricades.length}`,
+      `Weapons ${this.getOwnedWeaponsLabel().replace('Owned ', '')}`,
+      `Next wave ${this.wave + 1}`,
+      `Perks: ${perkNames.length > 0 ? perkNames.join(', ') : 'None'}`,
+    ].join('\n')
+  }
+
+  private formatShopItemLabel(itemId: ShopItemId) {
+    if (itemId === 'healPlayer') {
+      return `Heal +${shopUpgradeConfig.healAmount} HP — $${shopConfig.healPlayer.cost}`
+    }
+
+    if (itemId === 'repairAll') {
+      return `Repair All Doors — $${shopConfig.repairAll.cost}`
+    }
+
+    if (itemId === 'damageUpgrade') {
+      return `Damage +${shopUpgradeConfig.damageUpgradeAmount} — $${shopConfig.damageUpgrade.cost} — Level ${this.damageUpgradeLevel}`
+    }
+
+    if (itemId === 'maxHealthUpgrade') {
+      return `Max HP +${shopUpgradeConfig.maxHealthUpgradeAmount} — $${shopConfig.maxHealthUpgrade.cost} — Level ${this.maxHealthUpgradeLevel}`
+    }
+
+    if (itemId === 'buySmg') {
+      return this.ownedWeapons.has('smg') ? 'SMG — Owned' : `SMG — $${shopConfig.buySmg.cost}`
+    }
+
+    return this.ownedWeapons.has('shotgun') ? 'Shotgun — Owned' : `Shotgun — $${shopConfig.buyShotgun.cost}`
+  }
+
+  private canPurchaseShopItem(itemId: ShopItemId) {
+    const weaponUnlock = shopWeaponUnlocks[itemId]
+    if (weaponUnlock && this.ownedWeapons.has(weaponUnlock)) {
+      return false
+    }
+
+    if (itemId === 'healPlayer' && this.player.health >= this.player.maxHealth) {
+      return false
+    }
+
+    if (itemId === 'repairAll' && this.barricades.every((barricade) => barricade.health >= barricade.maxHealth)) {
+      return false
+    }
+
+    return this.cash >= shopConfig[itemId].cost
+  }
+
+  private refreshShopButtons() {
+    this.shopStatusText?.setText(this.formatShopStatus())
+    this.shopLabels.forEach((label, itemId) => {
+      const owned = Boolean(shopWeaponUnlocks[itemId] && this.ownedWeapons.has(shopWeaponUnlocks[itemId]!))
+      label.setText(this.formatShopItemLabel(itemId))
+      label.setColor(owned ? '#fff2a8' : this.canPurchaseShopItem(itemId) ? '#ffffff' : '#8d9794')
+    })
+    this.refreshPerkHud()
+  }
+
+  private refreshPerkHud() {
+    const names = this.ownedPerks.map((id) => getPerk(id).name)
+    this.perkText?.setText(names.length > 0 ? `Perks ${names.join(', ')}` : '')
+    this.perkText?.setVisible(!this.isNarrowHud() && names.length > 0 && !this.shopOverlay && !this.perkOverlay)
+  }
+
+  private showPerkChoice(choices: PerkConfig[]) {
+    this.hideShop()
+    this.perkOverlay?.destroy()
+    this.pendingPerkChoices = choices
+    const compact = this.isCompactMenu()
+    const items: Phaser.GameObjects.GameObject[] = [
+      this.add.rectangle(0, 0, compact ? 360 : 560, compact ? 520 : 480, 0x000000, 0.9),
+      this.add
+        .text(0, compact ? -210 : -190, 'Choose a Perk', {
+          color: '#fff2a8',
+          fontFamily: 'Arial',
+          fontSize: compact ? 28 : 36,
+          fontStyle: 'bold',
+        })
+        .setOrigin(0.5),
+      this.add
+        .text(0, compact ? -168 : -146, 'Permanent for this run', {
+          color: '#d9e8d9',
+          fontFamily: 'Arial',
+          fontSize: compact ? 15 : 18,
+        })
+        .setOrigin(0.5),
+    ]
+
+    choices.forEach((perk, index) => {
+      const card = this.add
+        .text(0, (compact ? -70 : -50) + index * (compact ? 110 : 100), `${perk.name}\n${perk.description}`, {
+          align: 'center',
+          backgroundColor: '#20262b',
+          color: '#ffffff',
+          fixedWidth: compact ? 320 : 420,
+          fontFamily: 'Arial',
+          fontSize: compact ? '18px' : '20px',
+          lineSpacing: 6,
+          padding: { x: 14, y: 14 },
+          wordWrap: { width: compact ? 292 : 392 },
+        })
+        .setOrigin(0.5)
+        .setInteractive({ useHandCursor: true })
+
+      card.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+        pointer.event.stopPropagation()
+        this.choosePerk(perk.id)
+      })
+      items.push(card)
+    })
+
+    this.perkOverlay = this.add.container(this.scale.width / 2, this.scale.height / 2, items)
+    this.perkOverlay.setDepth(16)
+    this.layoutHud()
+    this.setTouchActionButtonsVisible(true)
+  }
+
+  private choosePerk(id: PerkId) {
+    if (!this.pendingPerkChoices?.some((perk) => perk.id === id) || this.ownedPerks.includes(id)) {
+      return
+    }
+
+    this.ownedPerks.push(id)
+    this.perkWavesHandled.add(this.wave)
+    this.pendingPerkChoices = undefined
+    this.perkOverlay?.destroy()
+    this.perkOverlay = undefined
+    this.applyPerk(id)
+    this.playSound('purchase')
+    this.showMessage(getPerk(id).name, 'money')
+    this.refreshPerkHud()
+    this.showShop()
+  }
+
+  private applyPerk(id: PerkId) {
+    if (id === 'sprinter') {
+      this.player.speed = Math.round(this.basePlayerSpeed * 1.08)
+    }
+
+    if (id === 'barricadePlating') {
+      this.barricades.forEach((barricade) => {
+        barricade.syncHealth(Math.min(barricade.maxHealth + 25, barricade.health + 25), barricade.maxHealth + 25)
+      })
+      this.updateBarricadeHud()
+    }
+  }
+
+  private hasPerk(id: PerkId) {
+    return this.ownedPerks.includes(id)
+  }
+
+  private getRepairCost() {
+    return this.hasPerk('engineer') ? 15 : barricadeConfig.repairCost
+  }
+
+  private getRepairAmount() {
+    const amount = barricadeConfig.repairAmount
+    return this.hasPerk('fortifier') ? Math.round(amount * 1.25) : amount
+  }
+
+  private getShotDamage(weapon: WeaponConfig) {
+    let damage = weapon.damage + this.damageBonus
+    if (weapon.id === 'pistol' && this.hasPerk('deadeye')) {
+      damage = Math.round(damage * 1.2)
+    }
+
+    if (this.hasPerk('lastStand') && this.player.health / this.player.maxHealth < 0.3) {
+      damage = Math.round(damage * 1.25)
+    }
+
+    return damage
+  }
+
+  private getPelletCount(weapon: WeaponConfig) {
+    return weapon.id === 'shotgun' && this.hasPerk('closeQuarters') ? weapon.bulletsPerShot + 1 : weapon.bulletsPerShot
+  }
+
+  private formatRunSummary() {
+    const perkNames = this.ownedPerks.map((id) => getPerk(id).name)
+    const waveLabel = this.isIntermission ? `Cleared wave ${this.wave}` : `Reached wave ${this.wave}`
+    return `${waveLabel}\nKills ${this.zombiesKilled} · Cash $${this.cashEarned}\n${this.currentWeapon.name} · Repairs ${this.repairsDone}\nPerks: ${perkNames.length > 0 ? perkNames.join(', ') : 'None'}`
   }
 
   private spawnZombie() {
@@ -3096,15 +3397,18 @@ export default class GameScene extends Phaser.Scene {
     const deathY = zombie.y
 
     bullet.destroy()
+    if (bullet.weaponId === 'smg' && this.hasPerk('suppressiveFire')) {
+      zombie.suppressedUntil = this.time.now + 500
+    }
     const shotgunHit = bullet.weaponId === 'shotgun'
     this.spawnHitSpark(deathX, deathY, 0xfff2a8, shotgunHit ? 5 : 3, shotgunHit ? 22 : 14)
     this.playSound('zombieHit')
 
     if (zombie.takeDamage(bullet.damage, bulletDirection.x, bulletDirection.y)) {
       this.score += zombie.scoreValue
-      this.cash += 10
+      this.zombiesKilled += 1
+      this.updateCash(waveConfig.cashPerKill)
       this.scoreText.setText(`Score ${this.score}`)
-      this.cashText.setText(`Cash $${this.cash}`)
       const deathColor = zombie.enemyType === 'exploder' ? 0xff8c1a : enemyConfigs[zombie.enemyType].color
       const deathScale = zombie.enemyType === 'warden' ? 1.8 : 1
       this.spawnZombieDeathEffect(deathX, deathY, deathColor, deathScale)
@@ -3179,7 +3483,8 @@ export default class GameScene extends Phaser.Scene {
         return Math.max(multiplier, screamer.screamSpeedMultiplier)
       }, 1)
 
-      zombie.setSpeedMultiplier(speedMultiplier)
+      const slowed = zombie.suppressedUntil > this.time.now ? speedMultiplier * 0.72 : speedMultiplier
+      zombie.setSpeedMultiplier(slowed)
     })
   }
 
@@ -3275,7 +3580,7 @@ export default class GameScene extends Phaser.Scene {
       return
     }
 
-    this.hurtPlayer(zombie.damage)
+    this.hurtPlayer(zombie.damage, false, true)
   }
 
   private updateHealthBar() {
@@ -3325,7 +3630,7 @@ export default class GameScene extends Phaser.Scene {
       this.initials = loadLastInitials().split('')
       this.initialsCursor = 0
       const compact = this.isCompactMenu()
-      items.push(this.add.rectangle(0, 0, compact ? 360 : 480, compact ? 400 : 360, 0x000000, 0.82))
+      items.push(this.add.rectangle(0, 0, compact ? 360 : 500, compact ? 500 : 460, 0x000000, 0.82))
       items.push(
         this.add
           .text(0, compact ? -150 : -138, 'GAME OVER', {
@@ -3348,16 +3653,18 @@ export default class GameScene extends Phaser.Scene {
       )
       items.push(
         this.add
-          .text(0, -46, `Score: ${this.score}`, {
+          .text(0, -20, `Score ${this.score}\n${this.formatRunSummary()}`, {
+            align: 'center',
             color: '#ffffff',
             fontFamily: 'Arial',
-            fontSize: '24px',
+            fontSize: compact ? '15px' : '16px',
+            lineSpacing: 4,
           })
           .setOrigin(0.5),
       )
       items.push(
         this.add
-          .text(0, 78, 'Type initials, click letters, then Save / Enter', {
+          .text(0, 52, 'Type initials, click letters, then Save / Enter', {
             align: 'center',
             color: '#d9e8d9',
             fontFamily: 'Arial',
@@ -3368,7 +3675,7 @@ export default class GameScene extends Phaser.Scene {
 
       for (let index = 0; index < HIGH_SCORE_INITIALS_LENGTH; index += 1) {
         const letterButton = this.add
-          .text(-80 + index * 80, 10, this.initials[index] ?? 'A', {
+          .text(-80 + index * 80, 108, this.initials[index] ?? 'A', {
             align: 'center',
             backgroundColor: '#20262b',
             color: '#ffffff',
@@ -3391,7 +3698,7 @@ export default class GameScene extends Phaser.Scene {
       }
 
       const saveButton = this.add
-        .text(0, 132, 'Save Initials', {
+        .text(0, 176, 'Save Initials', {
           align: 'center',
           backgroundColor: '#2ecc71',
           color: '#101316',
@@ -3413,7 +3720,7 @@ export default class GameScene extends Phaser.Scene {
       this.input.keyboard?.on('keydown', this.handleInitialsKeydown, this)
     } else {
       const compact = this.isCompactMenu()
-      items.push(this.add.rectangle(0, 0, compact ? 360 : 460, compact ? 380 : 320, 0x000000, 0.82))
+      items.push(this.add.rectangle(0, 0, compact ? 360 : 500, compact ? 500 : 460, 0x000000, 0.82))
       items.push(
         this.add
           .text(0, compact ? -140 : -118, 'GAME OVER', {
@@ -3426,11 +3733,12 @@ export default class GameScene extends Phaser.Scene {
       )
       items.push(
         this.add
-          .text(0, -58, `Score: ${this.score}\n${formatBestHighScoreLabel()}`, {
+          .text(0, -70, `Score ${this.score}\n${this.formatRunSummary()}\n${formatBestHighScoreLabel()}`, {
             align: 'center',
             color: '#ffffff',
             fontFamily: 'Arial',
-            fontSize: '24px',
+            fontSize: compact ? '15px' : '18px',
+            lineSpacing: 4,
           })
           .setOrigin(0.5),
       )
@@ -3608,6 +3916,7 @@ export default class GameScene extends Phaser.Scene {
     this.pauseOverlay?.setPosition(gameSize.width / 2, gameSize.height / 2)
     this.lobbyOverlay?.setPosition(gameSize.width / 2, gameSize.height / 2)
     this.shopOverlay?.setPosition(gameSize.width / 2, gameSize.height / 2)
+    this.perkOverlay?.setPosition(gameSize.width / 2, gameSize.height / 2)
     this.gameOverOverlay?.setPosition(gameSize.width / 2, gameSize.height / 2)
     this.multiplayerNavDebugText?.setPosition(12, 120)
 

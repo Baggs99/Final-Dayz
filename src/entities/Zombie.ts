@@ -45,6 +45,7 @@ export default class Zombie extends Phaser.Physics.Arcade.Sprite {
   lastStuckCheckAt = 0
   lastStuckX = 0
   lastStuckY = 0
+  suppressedUntil = 0
   debugLabel?: Phaser.GameObjects.Text
   private lastAttackAt = 0
   private healthBarWidth = 32
