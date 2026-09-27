@@ -195,6 +195,8 @@ export default class GameScene extends Phaser.Scene {
   private turrets: PlacedTurret[] = []
   private lastMeleeAt = -10000
   private shopPage = 0
+  private toldMelee = false
+  private lastToolDenyAt = 0
   private touchMeleeButton?: Phaser.GameObjects.Text
   private touchMineButton?: Phaser.GameObjects.Text
   private touchTurretButton?: Phaser.GameObjects.Text
@@ -796,11 +798,14 @@ export default class GameScene extends Phaser.Scene {
 
     const fireX = this.firePad.centerX
     const fireTop = this.firePad.centerY - radius - 36
-    this.touchRepairButton?.setPosition(fireX, fireTop)
-    this.touchWeaponButton?.setPosition(fireX, fireTop - 52)
-    this.touchMeleeButton?.setPosition(fireX, fireTop - 104)
-    this.touchMineButton?.setPosition(fireX, fireTop - 156)
-    this.touchTurretButton?.setPosition(fireX, fireTop - 208)
+    const stack = [this.touchRepairButton, this.touchWeaponButton, this.touchMeleeButton]
+    if (this.ownsMines) {
+      stack.push(this.touchMineButton)
+    }
+    if (this.ownsTurret) {
+      stack.push(this.touchTurretButton)
+    }
+    stack.forEach((button, index) => button?.setPosition(fireX, fireTop - index * 48))
   }
 
   private placeTouchPad(pad: TouchPad, x: number, y: number) {
@@ -1841,8 +1846,8 @@ export default class GameScene extends Phaser.Scene {
     this.perkText.setWordWrapWidth(narrow ? 160 : 260)
     this.toolText.setPosition(left, top + 30 + line * 7)
     this.multiplayerText.setPosition(left, top + 30 + line * 8)
-    this.toolText.setText(this.formatToolHud())
-    this.toolText.setVisible(!hideCombatHud && !narrow && (this.ownsMines || this.ownsTurret))
+    this.toolText.setText(this.formatToolHud(this.time.now))
+    this.toolText.setVisible(!hideCombatHud && this.toolText.text.length > 0)
     this.waveText.setFontSize(narrow ? 14 : 20)
     this.scoreText.setFontSize(narrow ? 14 : 20)
     this.cashText.setFontSize(narrow ? 14 : 20)
@@ -2167,7 +2172,7 @@ export default class GameScene extends Phaser.Scene {
     this.refreshMeleeButton(time)
   }
 
-  private formatToolHud() {
+  private formatToolHud(time = this.time.now) {
     const parts: string[] = []
     if (this.ownsMines) {
       parts.push(`Mines ${this.mines.length}/${toolConfig.mineMax}`)
@@ -2175,16 +2180,32 @@ export default class GameScene extends Phaser.Scene {
     if (this.ownsTurret) {
       parts.push(`Turrets ${this.turrets.length}/${toolConfig.turretMax}`)
     }
+    if (!this.useTouchControls && this.isStarted && !this.isIntermission) {
+      const readyIn = toolConfig.meleeCooldownMs - (time - this.lastMeleeAt)
+      if (readyIn > 0) {
+        parts.push(`Melee ${(readyIn / 1000).toFixed(1)}s`)
+      }
+    }
     return parts.join('  ')
   }
 
   private refreshMeleeButton(time: number) {
-    if (!this.touchMeleeButton) {
+    const readyIn = toolConfig.meleeCooldownMs - (time - this.lastMeleeAt)
+    this.touchMeleeButton?.setText(readyIn > 0 ? `Melee ${(readyIn / 1000).toFixed(1)}` : 'Melee')
+    if (this.toolText && !this.shopOverlay && !this.perkOverlay && !this.startOverlay && !this.gameOverOverlay) {
+      this.toolText.setText(this.formatToolHud(time))
+      this.toolText.setVisible(this.toolText.text.length > 0)
+    }
+  }
+
+  private denyTool(message: string) {
+    const now = this.time.now
+    if (now - this.lastToolDenyAt < 700) {
       return
     }
 
-    const readyIn = toolConfig.meleeCooldownMs - (time - this.lastMeleeAt)
-    this.touchMeleeButton.setText(readyIn > 0 ? `Melee ${(readyIn / 1000).toFixed(1)}` : 'Melee')
+    this.lastToolDenyAt = now
+    this.showMessage(message, 'info')
   }
 
   private tryPlaceMine(time: number) {
@@ -2193,7 +2214,7 @@ export default class GameScene extends Phaser.Scene {
     }
 
     if (this.mines.length >= toolConfig.mineMax) {
-      this.showMessage('Max mines placed', 'warning')
+      this.denyTool('Max mines placed')
       return
     }
 
@@ -2204,7 +2225,8 @@ export default class GameScene extends Phaser.Scene {
     const sprite = this.add.circle(this.player.x, this.player.y, 8, 0xffc857, 0.9).setStrokeStyle(2, 0xff8c1a).setDepth(4)
     this.mines.push({ x: this.player.x, y: this.player.y, armedAt: time + toolConfig.mineArmMs, sprite })
     this.playSound('minePlace')
-    this.showMessage('Mine placed', 'info')
+    this.showMessage(`Mine placed ${this.mines.length}/${toolConfig.mineMax}`, 'info')
+    this.refreshMeleeButton(time)
   }
 
   private tryPlaceTurret(time: number) {
@@ -2213,7 +2235,7 @@ export default class GameScene extends Phaser.Scene {
     }
 
     if (this.turrets.length >= toolConfig.turretMax) {
-      this.showMessage('Max turrets placed', 'warning')
+      this.denyTool('Max turrets placed')
       return
     }
 
@@ -2225,11 +2247,19 @@ export default class GameScene extends Phaser.Scene {
     const aim = this.add.rectangle(this.player.x + 16, this.player.y, 16, 3, 0xd7f3ff).setDepth(4)
     this.turrets.push({ x: this.player.x, y: this.player.y, lastShotAt: time, base, aim })
     this.playSound('turretPlace')
-    this.showMessage('Turret placed', 'info')
+    this.showMessage(`Turret placed ${this.turrets.length}/${toolConfig.turretMax}`, 'info')
+    this.layoutTouchControls(this.scale.gameSize)
+    this.refreshMeleeButton(time)
   }
 
   private tryMelee(time: number) {
-    if (this.isIntermission || this.isGameOver || time - this.lastMeleeAt < toolConfig.meleeCooldownMs) {
+    if (this.isIntermission || this.isGameOver) {
+      return
+    }
+
+    const readyIn = toolConfig.meleeCooldownMs - (time - this.lastMeleeAt)
+    if (readyIn > 0) {
+      this.denyTool(`Melee ${(readyIn / 1000).toFixed(1)}s`)
       return
     }
 
@@ -2241,12 +2271,12 @@ export default class GameScene extends Phaser.Scene {
       aim.set(Math.cos(this.player.rotation), Math.sin(this.player.rotation))
     }
     aim.normalize()
-    const arc = this.add.circle(this.player.x + aim.x * 28, this.player.y + aim.y * 28, toolConfig.meleeRange * 0.55, 0xd7f3ff, 0.28).setDepth(5)
+    const arc = this.add.circle(this.player.x + aim.x * 24, this.player.y + aim.y * 24, 34, 0xd7f3ff, 0.22).setDepth(5)
     this.tweens.add({
       targets: arc,
       alpha: 0,
-      scale: 1.2,
-      duration: 140,
+      scale: 1.15,
+      duration: 110,
       onComplete: () => arc.destroy(),
     })
 
@@ -2301,13 +2331,13 @@ export default class GameScene extends Phaser.Scene {
   private detonateMine(mine: PlacedMine) {
     mine.sprite.destroy()
     this.playSound('mineBoom')
-    this.cameras.main.shake(70, 0.004)
-    const burst = this.add.circle(mine.x, mine.y, toolConfig.mineExplosionRadius, 0xff8c1a, 0.28).setDepth(4)
+    this.cameras.main.shake(40, 0.0022)
+    const burst = this.add.circle(mine.x, mine.y, toolConfig.mineExplosionRadius * 0.72, 0xff8c1a, 0.18).setDepth(4)
     this.tweens.add({
       targets: burst,
       alpha: 0,
-      scale: 1.15,
-      duration: 180,
+      scale: 1.2,
+      duration: 120,
       onComplete: () => burst.destroy(),
     })
 
@@ -2382,21 +2412,21 @@ export default class GameScene extends Phaser.Scene {
     this.playSound('flameTick')
     const range = this.currentWeapon.range ?? 150
     const halfCone = Phaser.Math.DegToRad(this.currentWeapon.spreadDegrees / 2)
-    for (let index = 0; index < 4; index += 1) {
+    for (let index = 0; index < 3; index += 1) {
       const puffAngle = angle + Phaser.Math.FloatBetween(-halfCone, halfCone)
-      const distance = Phaser.Math.Between(24, range)
+      const distance = Phaser.Math.Between(28, Math.floor(range * 0.85))
       const puff = this.add.circle(
         this.player.x + Math.cos(puffAngle) * distance,
         this.player.y + Math.sin(puffAngle) * distance,
-        Phaser.Math.Between(4, 8),
-        index % 2 === 0 ? 0xff8c1a : 0xffe08a,
-        0.7,
+        Phaser.Math.Between(3, 6),
+        index === 0 ? 0xffe08a : 0xff8c1a,
+        0.45,
       ).setDepth(5)
       this.tweens.add({
         targets: puff,
         alpha: 0,
-        scale: 0.4,
-        duration: 120,
+        scale: 0.5,
+        duration: 90,
         onComplete: () => puff.destroy(),
       })
     }
@@ -2656,6 +2686,15 @@ export default class GameScene extends Phaser.Scene {
       this.playSound('waveStart')
     }
 
+    if (this.wave === 1 && !this.toldMelee) {
+      this.toldMelee = true
+      this.time.delayedCall(1100, () => {
+        if (this.sys.isActive() && !this.isGameOver) {
+          this.showMessage(this.useTouchControls ? 'Melee button: emergency shove' : 'Space for melee shove', 'info')
+        }
+      })
+    }
+
     this.waveSpawnTimer = this.time.addEvent({
       delay: this.spawnDelay,
       repeat: this.zombiesToSpawn - 1,
@@ -2855,8 +2894,10 @@ export default class GameScene extends Phaser.Scene {
       const columns = compact ? 1 : 2
       const column = index % columns
       const row = Math.floor(index / columns)
+      const gearPage = compact && this.shopPage === 1
+      const step = compact ? (gearPage ? 56 : 50) : 68
       const x = compact ? 0 : column === 0 ? -155 : 155
-      const y = (compact ? -108 : -130) + row * (compact ? 50 : 58)
+      const y = (compact ? (gearPage ? -124 : -108) : -140) + row * step
       const button = this.createShopButton(
         x,
         y,
@@ -3086,8 +3127,9 @@ export default class GameScene extends Phaser.Scene {
     if (itemId === 'buyMines') {
       this.ownsMines = true
       if (!quiet) {
-        this.showMessage('Mines unlocked', 'money')
+        this.showMessage(this.useTouchControls ? 'Mines unlocked. Use the Mine button.' : 'Mines unlocked. Press Q to place mines.', 'money')
       }
+      this.layoutTouchControls(this.scale.gameSize)
       this.setTouchActionButtonsVisible(true)
       this.refreshShopButtons()
       return true
@@ -3096,8 +3138,9 @@ export default class GameScene extends Phaser.Scene {
     if (itemId === 'buyTurret') {
       this.ownsTurret = true
       if (!quiet) {
-        this.showMessage('Turret unlocked', 'money')
+        this.showMessage(this.useTouchControls ? 'Turret unlocked. Use the Turret button.' : 'Turret unlocked. Press T to place turret.', 'money')
       }
+      this.layoutTouchControls(this.scale.gameSize)
       this.setTouchActionButtonsVisible(true)
       this.refreshShopButtons()
       return true
@@ -3165,18 +3208,24 @@ export default class GameScene extends Phaser.Scene {
     }
 
     if (itemId === 'buyRifle') {
-      return this.ownedWeapons.has('rifle') ? 'Rifle — Owned' : `Rifle — $${shopConfig.buyRifle.cost}`
+      return this.ownedWeapons.has('rifle')
+        ? `Rifle — Owned\n${weapons.rifle.description}`
+        : `Rifle — $${shopConfig.buyRifle.cost}\n${weapons.rifle.description}`
     }
 
     if (itemId === 'buyFlamethrower') {
-      return this.ownedWeapons.has('flamethrower') ? 'Flamethrower — Owned' : `Flamethrower — $${shopConfig.buyFlamethrower.cost}`
+      return this.ownedWeapons.has('flamethrower')
+        ? `Flamethrower — Owned\n${weapons.flamethrower.description}`
+        : `Flamethrower — $${shopConfig.buyFlamethrower.cost}\n${weapons.flamethrower.description}`
     }
 
     if (itemId === 'buyMines') {
-      return this.ownsMines ? 'Mines — Owned' : `Mines — $${shopConfig.buyMines.cost}`
+      const how = this.useTouchControls ? 'Mine button. Place explosive traps.' : 'Q / Mine button. Place explosive traps.'
+      return this.ownsMines ? `Mines — Owned\n${how}` : `Mines — $${shopConfig.buyMines.cost}\n${how}`
     }
 
-    return this.ownsTurret ? 'Turret — Owned' : `Turret — $${shopConfig.buyTurret.cost}`
+    const how = this.useTouchControls ? 'Turret button. Auto-fires nearby.' : 'T / Turret button. Auto-fires nearby.'
+    return this.ownsTurret ? `Turret — Owned\n${how}` : `Turret — $${shopConfig.buyTurret.cost}\n${how}`
   }
 
   private canPurchaseShopItem(itemId: ShopItemId) {

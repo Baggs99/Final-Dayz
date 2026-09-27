@@ -33,6 +33,11 @@ export default class Bullet extends Phaser.Physics.Arcade.Sprite {
     if (weaponId === 'rifle') {
       this.setDisplaySize(18, 4)
     }
+
+    if (weaponId === 'turret') {
+      this.setTint(0x8fd3ff)
+      this.setDisplaySize(6, 6)
+    }
   }
 
   launch(directionX: number, directionY: number) {

@@ -1,4 +1,4 @@
-import type { WeaponId } from './weapons'
+import { toolConfig, weapons, type WeaponId } from './weapons'
 
 export type ShopItemId =
   | 'healPlayer'
@@ -56,22 +56,22 @@ export const shopConfig: Record<ShopItemId, ShopItemConfig> = {
   buyRifle: {
     id: 'buyRifle',
     label: 'Buy Rifle',
-    cost: 450,
+    cost: weapons.rifle.cost,
   },
   buyFlamethrower: {
     id: 'buyFlamethrower',
     label: 'Buy Flamethrower',
-    cost: 600,
+    cost: weapons.flamethrower.cost,
   },
   buyMines: {
     id: 'buyMines',
     label: 'Buy Mines',
-    cost: 350,
+    cost: toolConfig.mineUnlockCost,
   },
   buyTurret: {
     id: 'buyTurret',
     label: 'Buy Turret',
-    cost: 700,
+    cost: toolConfig.turretUnlockCost,
   },
 }
 
