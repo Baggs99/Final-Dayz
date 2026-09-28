@@ -272,7 +272,86 @@ export default class GameScene extends Phaser.Scene {
     this.createCircleTexture('bullet', 8, 0xfff2a8, 0xffffff)
   }
 
+  /**
+   * Phaser keeps this scene object on restart, so field initializers do not run again.
+   * Without this, isGameOver stays true and spawnZombie refuses to create anything.
+   */
+  private resetRunState() {
+    this.wallRects = []
+    this.barricades = []
+    this.entryPoints = []
+    this.shopButtons = []
+    this.mines = []
+    this.turrets = []
+    this.doorWarnings.clear()
+    this.doorToastAt.clear()
+    this.shopLabels.clear()
+    this.initialsLetterTexts = []
+
+    this.nextRoundClickCount = 0
+    this.nextRoundClickAt = 0
+    this.shopItemClick = undefined
+    this.shopHoldTimer = undefined
+    this.wave = 0
+    this.score = 0
+    this.cash = 0
+    this.currentWeaponId = defaultWeaponId
+    this.ownedWeapons = new Set<WeaponId>([defaultWeaponId])
+    this.ownsMines = false
+    this.ownsTurret = false
+    this.lastMeleeAt = -10000
+    this.shopPage = 0
+    this.toldMelee = false
+    this.lastToolDenyAt = 0
+    this.damageBonus = 0
+    this.damageUpgradeLevel = 0
+    this.maxHealthUpgradeLevel = 0
+    this.ownedPerks = []
+    this.perkWavesHandled = new Set()
+    this.zombiesKilled = 0
+    this.cashEarned = 0
+    this.repairsDone = 0
+    this.lastWaveBonus = 0
+    this.lastShopFailAt = 0
+    this.zombiesToSpawn = 0
+    this.spawnDelay = 900
+    this.lastShotAt = 0
+    this.lastContactDamageAt = 0
+    this.elapsedMs = 0
+    this.lastTimerUpdate = 0
+    this.messageTimer = undefined
+    this.waveSpawnTimer = undefined
+    this.pendingBossEnemyType = undefined
+    this.waveModifier = undefined
+    this.pendingPerkChoices = undefined
+    this.isIntermission = false
+    this.isStarted = false
+    this.isPaused = false
+    this.isGameOver = false
+    this.isEnteringInitials = false
+    this.isSavingHighScore = false
+    this.gameMode = 'singlePlayer'
+    this.lastPlayerZone = 'inside'
+    this.runIsPersonalBest = false
+    this.announcedPersonalBest = false
+    this.personalBestAtStart = loadPersonalBest()
+    this.lastNetworkSendAt = 0
+    this.localPlayerId = undefined
+    this.activeRoomCode = undefined
+    this.startOverlay = undefined
+    this.gameOverOverlay = undefined
+    this.shopOverlay = undefined
+    this.perkOverlay = undefined
+    this.pauseOverlay = undefined
+    this.lobbyOverlay = undefined
+    this.waveBanner = undefined
+
+    this.time.paused = false
+    this.physics.world.resume()
+  }
+
   create() {
+    this.resetRunState()
     const params = new URLSearchParams(window.location.search)
     this.debugNavRender = params.get('debugNav') === '1'
     this.coopDebug = params.get('coopDebug') === '1'
@@ -1065,6 +1144,9 @@ export default class GameScene extends Phaser.Scene {
 
   private startGame(mode: GameMode) {
     this.gameMode = mode
+    this.isGameOver = false
+    this.isPaused = false
+    this.time.paused = false
     this.isStarted = true
     this.skipRoundButton.setVisible(mode === 'singlePlayer')
     this.startOverlay?.destroy()
