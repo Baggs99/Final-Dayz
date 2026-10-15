@@ -51,6 +51,11 @@ export default class Zombie extends Phaser.Physics.Arcade.Sprite {
   nextSpitAt = 0
   lastSpecialAt = 0
   exploded = false
+  gooDropX?: number
+  gooDropY?: number
+  patternAngle = 0
+  aimLockX = 0
+  aimLockY = 0
   debugLabel?: Phaser.GameObjects.Text
   private lastAttackAt = 0
   private healthBarWidth = 32
@@ -67,12 +72,13 @@ export default class Zombie extends Phaser.Physics.Arcade.Sprite {
     scene.physics.add.existing(this)
 
     const config = enemyConfigs[enemyType]
+    const paceWave = Math.min(wave, waveConfig.paceCapWave)
     this.enemyType = enemyType
     this.maxHealth = Math.round((this.maxHealth + wave * waveConfig.zombieHealthPerWave) * config.healthMultiplier * healthScale)
     this.health = this.maxHealth
-    this.baseSpeed = Math.round((this.baseSpeed + wave * waveConfig.zombieSpeedPerWave) * config.speedMultiplier)
+    this.baseSpeed = Math.round((this.baseSpeed + paceWave * waveConfig.zombieSpeedPerWave) * config.speedMultiplier)
     this.speed = this.baseSpeed
-    this.damage = Math.round(this.damage * config.damageMultiplier)
+    this.damage = Math.round((this.damage + Math.max(0, wave - 1) * waveConfig.biteDamagePerWave) * config.damageMultiplier)
     this.scoreValue = config.scoreValue
     this.cashValue = config.cashValue
     this.barricadeDamageMultiplier = config.barricadeDamageMultiplier ?? 1
@@ -88,6 +94,9 @@ export default class Zombie extends Phaser.Physics.Arcade.Sprite {
     this.setDrag(120)
     this.setTint(config.color)
     this.setDisplaySize(config.radius * 2, config.radius * 2)
+    if (enemyType === 'goo') {
+      this.setDepth(2)
+    }
 
     const isWarden = enemyType === 'warden'
     this.healthBarWidth = isWarden ? 78 : 32

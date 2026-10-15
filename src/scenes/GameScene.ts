@@ -1,6 +1,6 @@
 import Phaser from 'phaser'
 import { barricadeConfig } from '../config/barricades'
-import { enemyConfigs, getBossEnemyTypeForWave, pickEnemyTypeForWave, type EnemyType } from '../config/enemies'
+import { enemyConfigs, getBossEnemyTypeForWave, gooTrailConfig, pickEnemyTypeForWave, type EnemyType } from '../config/enemies'
 import { rollWaveModifier, type WaveModifier } from '../config/waveModifiers'
 import {
   buildShareText,
@@ -70,10 +70,49 @@ type PlacedMine = {
   sprite: Phaser.GameObjects.Arc
 }
 
+type GooBlob = {
+  x: number
+  y: number
+  expiresAt: number
+  sprite: Phaser.GameObjects.Arc
+}
+
+type PatternShot = {
+  kind: 'pellet' | 'gnat' | 'shard'
+  x: number
+  y: number
+  vx: number
+  vy: number
+  damage: number
+  radius: number
+  expiresAt: number
+  turnAfter: number
+  sprite: Phaser.GameObjects.Arc
+}
+
+type ArtilleryMark = {
+  x: number
+  y: number
+  explodeAt: number
+  sprite: Phaser.GameObjects.Arc
+}
+
+type BeamTelegraph = {
+  fromX: number
+  fromY: number
+  toX: number
+  toY: number
+  fireAt: number
+  fired: boolean
+  sprite: Phaser.GameObjects.Rectangle
+}
+
 type PlacedTurret = {
   x: number
   y: number
   lastShotAt: number
+  shotsFired: number
+  overheated: boolean
   base: Phaser.GameObjects.Arc
   aim: Phaser.GameObjects.Rectangle
 }
@@ -196,8 +235,13 @@ export default class GameScene extends Phaser.Scene {
   private ownsTurret = false
   private mines: PlacedMine[] = []
   private turrets: PlacedTurret[] = []
+  private gooBlobs: GooBlob[] = []
+  private patternShots: PatternShot[] = []
+  private artilleryMarks: ArtilleryMark[] = []
+  private beamTelegraphs: BeamTelegraph[] = []
   private lastMeleeAt = -10000
-  private shopPage = 0
+  private shopOffers: ShopItemId[] = []
+  private shopOfferWave = -1
   private toldMelee = false
   private lastToolDenyAt = 0
   private touchMeleeButton?: Phaser.GameObjects.Text
@@ -225,6 +269,8 @@ export default class GameScene extends Phaser.Scene {
   private waveSpawnTimer?: Phaser.Time.TimerEvent
   private pendingBossEnemyType?: EnemyType
   private waveModifier?: WaveModifier
+  private pressureActive = false
+  private waveStartedAt = 0
   private isIntermission = false
   private isStarted = false
   private isPaused = false
@@ -283,6 +329,8 @@ export default class GameScene extends Phaser.Scene {
     this.shopButtons = []
     this.mines = []
     this.turrets = []
+    this.clearGooTrails()
+    this.clearPatternHazards()
     this.doorWarnings.clear()
     this.doorToastAt.clear()
     this.shopLabels.clear()
@@ -300,7 +348,8 @@ export default class GameScene extends Phaser.Scene {
     this.ownsMines = false
     this.ownsTurret = false
     this.lastMeleeAt = -10000
-    this.shopPage = 0
+    this.shopOffers = []
+    this.shopOfferWave = -1
     this.toldMelee = false
     this.lastToolDenyAt = 0
     this.damageBonus = 0
@@ -323,6 +372,8 @@ export default class GameScene extends Phaser.Scene {
     this.waveSpawnTimer = undefined
     this.pendingBossEnemyType = undefined
     this.waveModifier = undefined
+    this.pressureActive = false
+    this.waveStartedAt = 0
     this.pendingPerkChoices = undefined
     this.isIntermission = false
     this.isStarted = false
@@ -363,6 +414,7 @@ export default class GameScene extends Phaser.Scene {
     this.walls = this.physics.add.staticGroup()
 
     this.player = new Player(this, this.scale.width / 2, this.scale.height / 2)
+    this.player.setDepth(4)
     this.lastAimWorldPoint.set(this.player.x + 1, this.player.y)
     this.keys = this.input.keyboard!.addKeys('W,A,S,D,ONE,TWO,THREE,FOUR,FIVE,Q,T,SPACE,E,ENTER') as WasdKeys
 
@@ -416,6 +468,7 @@ export default class GameScene extends Phaser.Scene {
     const centis = Math.floor((this.elapsedMs % 1000) / 10).toString().padStart(2, '0')
     this.timerText.setText(`${mins}:${secs}.${centis}`)
 
+    this.updateGooTrails(time)
     this.updatePlayerMovement()
     this.updatePlayerAim()
     this.updateWeaponSwitching()
@@ -430,7 +483,9 @@ export default class GameScene extends Phaser.Scene {
     }
 
     if (this.gameMode === 'singlePlayer' && !this.isIntermission) {
+      this.updatePressureClock()
       this.updatePlayerTools(time)
+      this.waveText.setText(this.formatWaveLabel())
     }
 
     this.clearNavigationPathDebug()
@@ -440,11 +495,13 @@ export default class GameScene extends Phaser.Scene {
       this.zombies.children.each((child) => {
         const zombie = child as Zombie
         this.updateZombieTarget(zombie, time)
+        this.nudgeWeaver(zombie, time)
         this.updateWarden(zombie, time)
         this.updateZombieDebugLabel(zombie)
         this.damagePlayerOnContact(zombie, time)
         return true
       })
+      this.updatePatternHazards(time)
     }
 
     if (this.gameMode === 'singlePlayer' && !this.isIntermission && this.zombiesToSpawn === 0 && this.zombies.countActive(true) === 0) {
@@ -2337,8 +2394,67 @@ export default class GameScene extends Phaser.Scene {
       direction.y += this.movePad.vector.y
     }
 
-    direction.normalize().scale(this.player.speed)
+    direction.normalize().scale(this.getMoveSpeed())
     body.setVelocity(direction.x, direction.y)
+  }
+
+  private getMoveSpeed() {
+    const speed = Math.round(this.basePlayerSpeed * (this.hasPerk('sprinter') ? 1.08 : 1))
+    return this.isPlayerInGoo() ? Math.round(speed * gooTrailConfig.slowMultiplier) : speed
+  }
+
+  private updateGooTrails(time: number) {
+    this.gooBlobs = this.gooBlobs.filter((blob) => {
+      if (time >= blob.expiresAt) {
+        blob.sprite.destroy()
+        return false
+      }
+
+      const life = (blob.expiresAt - time) / gooTrailConfig.lifetimeMs
+      blob.sprite.setAlpha(0.18 + life * 0.42)
+      return true
+    })
+
+    if (this.isIntermission || this.gameMode !== 'singlePlayer') {
+      return
+    }
+
+    this.zombies.children.each((child) => {
+      const zombie = child as Zombie
+      if (!zombie.active || zombie.enemyType !== 'goo') {
+        return true
+      }
+
+      const lastX = zombie.gooDropX
+      const lastY = zombie.gooDropY
+      const moved = lastX === undefined || lastY === undefined || Phaser.Math.Distance.Between(zombie.x, zombie.y, lastX, lastY) >= gooTrailConfig.spacing
+      if (!moved) {
+        return true
+      }
+
+      this.dropGooBlob(zombie.x, zombie.y, time)
+      zombie.gooDropX = zombie.x
+      zombie.gooDropY = zombie.y
+      return true
+    })
+  }
+
+  private dropGooBlob(x: number, y: number, time: number) {
+    const sprite = this.add.circle(x, y, gooTrailConfig.radius, 0x1ed6a4, 0.55).setStrokeStyle(2, 0x0e6b56, 0.7).setDepth(1)
+    this.gooBlobs.push({ x, y, expiresAt: time + gooTrailConfig.lifetimeMs, sprite })
+    if (this.gooBlobs.length > 80) {
+      const oldest = this.gooBlobs.shift()
+      oldest?.sprite.destroy()
+    }
+  }
+
+  private isPlayerInGoo() {
+    return this.gooBlobs.some((blob) => Phaser.Math.Distance.Between(this.player.x, this.player.y, blob.x, blob.y) <= gooTrailConfig.radius + 8)
+  }
+
+  private clearGooTrails() {
+    this.gooBlobs.forEach((blob) => blob.sprite.destroy())
+    this.gooBlobs = []
   }
 
   private isFiringInputActive() {
@@ -2417,7 +2533,8 @@ export default class GameScene extends Phaser.Scene {
       parts.push(`Mines ${this.mines.length}/${toolConfig.mineMax}`)
     }
     if (this.ownsTurret) {
-      parts.push(`Turrets ${this.turrets.length}/${toolConfig.turretMax}`)
+      const hot = this.turrets.filter((turret) => turret.overheated).length
+      parts.push(hot > 0 ? `Turrets ${hot} hot` : `Turrets ${this.turrets.length}/${toolConfig.turretMax}`)
     }
     if (!this.useTouchControls && this.isStarted && !this.isIntermission) {
       const readyIn = toolConfig.meleeCooldownMs - (time - this.lastMeleeAt)
@@ -2484,7 +2601,7 @@ export default class GameScene extends Phaser.Scene {
 
     const base = this.add.circle(this.player.x, this.player.y, 12, 0x8fd3ff, 0.95).setStrokeStyle(2, 0xd7f3ff).setDepth(4)
     const aim = this.add.rectangle(this.player.x + 16, this.player.y, 16, 3, 0xd7f3ff).setDepth(4)
-    this.turrets.push({ x: this.player.x, y: this.player.y, lastShotAt: time, base, aim })
+    this.turrets.push({ x: this.player.x, y: this.player.y, lastShotAt: time, shotsFired: 0, overheated: false, base, aim })
     this.playSound('turretPlace')
     this.showMessage(`Turret placed ${this.turrets.length}/${toolConfig.turretMax}`, 'info')
     this.layoutTouchControls(this.scale.gameSize)
@@ -2599,6 +2716,14 @@ export default class GameScene extends Phaser.Scene {
 
   private updateTurrets(time: number) {
     this.turrets.forEach((turret) => {
+      if (turret.overheated) {
+        const pulse = 0.55 + Math.sin(time / 120) * 0.25
+        turret.base.setFillStyle(0xff5a36, pulse)
+        turret.aim.setPosition(turret.x + 10, turret.y)
+        return
+      }
+
+      turret.base.setFillStyle(0x8fd3ff, 0.95)
       const target = this.nearestZombie(turret.x, turret.y, toolConfig.turretRange)
       if (!target) {
         turret.aim.setPosition(turret.x + 16, turret.y)
@@ -2613,6 +2738,7 @@ export default class GameScene extends Phaser.Scene {
       }
 
       turret.lastShotAt = time
+      turret.shotsFired += 1
       this.playSound('turretShot')
       const direction = new Phaser.Math.Vector2(Math.cos(angle), Math.sin(angle))
       const bullet = new Bullet(
@@ -2625,7 +2751,43 @@ export default class GameScene extends Phaser.Scene {
       )
       this.bullets.add(bullet)
       bullet.launch(direction.x, direction.y)
+      if (turret.shotsFired >= toolConfig.turretBurstShots) {
+        turret.overheated = true
+        this.showMessage(this.useTouchControls ? 'Turret overheated. Restart it up close.' : 'Turret overheated. Press E beside it.', 'warning')
+      }
     })
+  }
+
+  private coolTurrets() {
+    this.turrets.forEach((turret) => {
+      turret.overheated = false
+      turret.shotsFired = 0
+      turret.base.setFillStyle(0x8fd3ff, 0.95)
+    })
+  }
+
+  private getNearbyOverheatedTurret() {
+    return this.turrets.find((turret) => {
+      if (!turret.overheated) {
+        return false
+      }
+
+      return Phaser.Math.Distance.Between(this.player.x, this.player.y, turret.x, turret.y) <= barricadeConfig.repairRange
+    })
+  }
+
+  private tryRestartNearbyTurret() {
+    const turret = this.getNearbyOverheatedTurret()
+    if (!turret) {
+      return false
+    }
+
+    turret.overheated = false
+    turret.shotsFired = 0
+    turret.base.setFillStyle(0x8fd3ff, 0.95)
+    this.playSound('repair')
+    this.showMessage('Turret restarted', 'info')
+    return true
   }
 
   private nearestZombie(x: number, y: number, range: number) {
@@ -2693,6 +2855,7 @@ export default class GameScene extends Phaser.Scene {
       this.applyZombieDamage(zombie, damage, knock.x * 0.15, knock.y * 0.15, true)
       return true
     })
+    this.swatPatternShots(this.player.x, this.player.y, angle, halfCone, range)
   }
 
   private applyZombieDamage(zombie: Zombie, damage: number, knockX: number, knockY: number, quietHit: boolean) {
@@ -2716,6 +2879,9 @@ export default class GameScene extends Phaser.Scene {
     const deathScale = zombie.enemyType === 'warden' ? 1.9 : zombie.enemyType === 'brute' ? 1.35 : zombie.enemyType === 'screamer' ? 1.25 : 1
     this.spawnZombieDeathEffect(deathX, deathY, deathColor, deathScale)
     this.triggerExploderBurst(zombie, deathX, deathY, false)
+    if (zombie.enemyType === 'splitter') {
+      this.burstSplitter(deathX, deathY)
+    }
     this.showFloatingScore(deathX, deathY, zombie.scoreValue, zombie.enemyType === 'warden' ? 28 : 18)
     if (zombie.enemyType === 'warden') {
       this.playSound('wardenDeath')
@@ -2752,21 +2918,37 @@ export default class GameScene extends Phaser.Scene {
   }
 
   private updateRepairInteraction() {
+    const overheatedTurret = this.getNearbyOverheatedTurret()
     const repairTarget = this.getNearbyDamagedBarricade()
-    const hint = this.useTouchControls
-      ? `Tap Repair ($${this.getRepairCost()})`
-      : `Press E to repair ($${this.getRepairCost()})`
-    this.repairHintText.setText(repairTarget ? hint : '')
+    const hint = overheatedTurret
+      ? this.useTouchControls ? 'Tap Repair to restart turret' : 'Press E to restart turret'
+      : repairTarget
+        ? this.useTouchControls
+          ? `Tap Repair ($${this.getRepairCost()})`
+          : `Press E to repair ($${this.getRepairCost()})`
+        : ''
+    this.repairHintText.setText(hint)
 
-    if (!repairTarget || !Phaser.Input.Keyboard.JustDown(this.keys.E)) {
+    if (!Phaser.Input.Keyboard.JustDown(this.keys.E)) {
       return
     }
 
-    this.tryRepair()
+    if (overheatedTurret) {
+      this.tryRestartNearbyTurret()
+      return
+    }
+
+    if (repairTarget) {
+      this.tryRepair()
+    }
   }
 
   private tryRepair() {
     if (this.gameMode !== 'singlePlayer') {
+      return
+    }
+
+    if (this.tryRestartNearbyTurret()) {
       return
     }
 
@@ -2910,15 +3092,20 @@ export default class GameScene extends Phaser.Scene {
     this.hideShop()
     this.waveSpawnTimer?.remove(false)
     this.wave += 1
+    this.pressureActive = false
+    this.waveStartedAt = this.time.now
+    this.coolTurrets()
     this.waveModifier = rollWaveModifier(this.wave)
     const countMultiplier = this.waveModifier?.countMultiplier ?? 1
-    this.zombiesToSpawn = Math.max(1, Math.round((waveConfig.baseZombieCount + this.wave * waveConfig.zombiesPerWave) * countMultiplier))
+    const pacedWave = Math.min(this.wave, waveConfig.paceCapWave)
+    const lateWaves = Math.max(0, this.wave - waveConfig.paceCapWave)
+    this.zombiesToSpawn = Math.max(1, Math.round((waveConfig.baseZombieCount + pacedWave * waveConfig.zombiesPerWave) * countMultiplier))
     this.pendingBossEnemyType = getBossEnemyTypeForWave(this.wave)
     this.spawnDelay = Math.max(
-      waveConfig.minSpawnDelayMs,
-      waveConfig.baseSpawnDelayMs - this.wave * waveConfig.spawnDelayReductionPerWaveMs,
+      this.wave > waveConfig.paceCapWave ? waveConfig.lateMinSpawnDelayMs : waveConfig.minSpawnDelayMs,
+      waveConfig.baseSpawnDelayMs - this.wave * waveConfig.spawnDelayReductionPerWaveMs - lateWaves * waveConfig.lateSpawnDelayReductionPerWaveMs,
     )
-    this.waveText.setText(`Wave ${this.wave}`)
+    this.waveText.setText(this.formatWaveLabel())
     this.skipRoundButton.setText('Skip Round')
     this.skipRoundButton.setVisible(this.gameMode === 'singlePlayer')
     if (this.pendingBossEnemyType) {
@@ -2956,10 +3143,13 @@ export default class GameScene extends Phaser.Scene {
 
     this.lastWaveBonus = bonus
     this.updateCash(bonus)
+    this.waveText.setText(this.formatWaveLabel())
     this.waveBanner?.destroy()
     this.waveBanner = undefined
     this.playSound('waveComplete')
     this.vibrate(18)
+    this.clearGooTrails()
+    this.clearPatternHazards()
     this.skipRoundButton.setText('Next Wave')
     this.offerPerkOrShop()
   }
@@ -2967,6 +3157,79 @@ export default class GameScene extends Phaser.Scene {
   private getWaveBonus(wave: number) {
     const bonus = waveConfig.waveBonusBase + wave * waveConfig.waveBonusPerWave
     return this.hasPerk('bonusCash') ? Math.round(bonus * 1.25) : bonus
+  }
+
+  private getShopItemCost(itemId: ShopItemId) {
+    if (itemId === 'healPlayer') {
+      return Math.max(shopConfig.healPlayer.cost, Math.round(shopConfig.healPlayer.cost * (this.player.maxHealth / 100)))
+    }
+
+    if (itemId === 'maxHealthUpgrade') {
+      return Math.round(shopConfig.maxHealthUpgrade.cost * waveConfig.maxHealthCostGrowth ** this.maxHealthUpgradeLevel)
+    }
+
+    return shopConfig[itemId].cost
+  }
+
+  private getPressureBudgetMs() {
+    const lateWaves = Math.max(0, this.wave - waveConfig.pressureStartWave)
+    return Math.max(waveConfig.pressureMinMs, waveConfig.pressureBaseMs - lateWaves * waveConfig.pressureShrinkPerWaveMs)
+  }
+
+  private formatWaveLabel() {
+    if (this.isIntermission || this.wave < waveConfig.pressureStartWave || !this.waveStartedAt) {
+      return `Wave ${this.wave}`
+    }
+
+    if (this.pressureActive) {
+      return `Wave ${this.wave}  ·  RUSHING`
+    }
+
+    const secondsLeft = Math.max(0, Math.ceil((this.getPressureBudgetMs() - (this.time.now - this.waveStartedAt)) / 1000))
+    return `Wave ${this.wave}  ·  ${secondsLeft}s`
+  }
+
+  private updatePressureClock() {
+    if (this.pressureActive || this.isGameOver || this.wave < waveConfig.pressureStartWave || !this.waveStartedAt) {
+      return
+    }
+
+    if (this.zombiesToSpawn === 0 && this.zombies.countActive(true) === 0) {
+      return
+    }
+
+    if (this.time.now - this.waveStartedAt < this.getPressureBudgetMs()) {
+      return
+    }
+
+    this.pressureActive = true
+    this.showWaveBanner('PRESSURE', '#ff6b6b')
+    this.showMessage('The horde is rushing', 'danger')
+    this.playSound('wardenWarn')
+    this.vibrate(30)
+    const wardenAlive = this.zombies.children.entries.some((child) => {
+      const zombie = child as Zombie
+      return zombie.active && zombie.enemyType === 'warden'
+    })
+    if (!wardenAlive) {
+      this.spawnPressureWarden()
+    }
+  }
+
+  private spawnPressureWarden() {
+    const { x, y } = this.getRandomEdgeSpawnPoint()
+    const zombie = new Zombie(this, x, y, this.wave, 'warden', 1)
+    this.zombies.add(zombie)
+    this.showMessage('THE WARDEN HAS ENTERED', 'danger')
+    this.cameras.main.shake(180, 0.007)
+    const pulse = this.add.circle(x, y, 36, 0x4d6bff, 0.2).setStrokeStyle(4, 0x8eb4ff, 0.8).setDepth(4)
+    this.tweens.add({ targets: pulse, scale: 3.2, alpha: 0, duration: 420, onComplete: () => pulse.destroy() })
+  }
+
+  private getBiteDamage(zombie: Zombie) {
+    const multiplier = enemyConfigs[zombie.enemyType].damageMultiplier
+    const fromHealth = Math.round(this.player.maxHealth * waveConfig.biteMaxHealthFraction * multiplier)
+    return zombie.damage + fromHealth
   }
 
   private handleNextRoundClick() {
@@ -3059,6 +3322,8 @@ export default class GameScene extends Phaser.Scene {
       zombie.destroy()
       return true
     })
+    this.clearGooTrails()
+    this.clearPatternHazards()
   }
 
   private skipRound() {
@@ -3087,6 +3352,42 @@ export default class GameScene extends Phaser.Scene {
     this.showShop()
   }
 
+  private rollShopOffers() {
+    if (this.shopOfferWave === this.wave && this.shopOffers.length > 0) {
+      return this.shopOffers
+    }
+
+    const pool: ShopItemId[] = ['repairAll', 'damageUpgrade', 'maxHealthUpgrade', 'buySmg', 'buyShotgun', 'buyRifle', 'buyFlamethrower', 'buyMines', 'buyTurret']
+    const available = pool.filter((itemId) => !this.isShopItemOwned(itemId))
+    for (let index = available.length - 1; index > 0; index -= 1) {
+      const swap = Math.floor(Math.random() * (index + 1))
+      const current = available[index]
+      available[index] = available[swap]
+      available[swap] = current
+    }
+
+    this.shopOffers = ['healPlayer', ...available.slice(0, 3)]
+    this.shopOfferWave = this.wave
+    return this.shopOffers
+  }
+
+  private isShopItemOwned(itemId: ShopItemId) {
+    const weaponUnlock = shopWeaponUnlocks[itemId]
+    if (weaponUnlock) {
+      return this.ownedWeapons.has(weaponUnlock)
+    }
+
+    if (itemId === 'buyMines') {
+      return this.ownsMines
+    }
+
+    if (itemId === 'buyTurret') {
+      return this.ownsTurret
+    }
+
+    return false
+  }
+
   private showShop() {
     this.waveBanner?.destroy()
     this.waveBanner = undefined
@@ -3095,9 +3396,7 @@ export default class GameScene extends Phaser.Scene {
     const compact = this.isCompactMenu()
     const panelWidth = Math.min(compact ? 340 : 680, Math.max(280, this.scale.width - 24))
     const buttonWidth = compact ? panelWidth - 36 : 300
-    const upgradeItems: ShopItemId[] = ['healPlayer', 'repairAll', 'damageUpgrade', 'maxHealthUpgrade']
-    const gearItems: ShopItemId[] = ['buySmg', 'buyShotgun', 'buyRifle', 'buyFlamethrower', 'buyMines', 'buyTurret']
-    const shopEntries = compact ? (this.shopPage === 0 ? upgradeItems : gearItems) : [...upgradeItems, ...gearItems]
+    const shopEntries = this.rollShopOffers()
     const content: Phaser.GameObjects.GameObject[] = []
     let cursor = 18
 
@@ -3153,16 +3452,6 @@ export default class GameScene extends Phaser.Scene {
         return button
       })
       cursor += Math.max(...rowButtons.map((button) => button.height)) + 8
-    }
-
-    if (compact) {
-      const pageButton = this.createShopButton(0, cursor, this.shopPage === 0 ? 'Weapons & Tools' : 'Upgrades', () => {
-        this.shopPage = this.shopPage === 0 ? 1 : 0
-        this.showShop()
-      }, undefined, '#20262b', '#fff2a8', buttonWidth)
-      pageButton.setOrigin(0.5, 0)
-      cursor += pageButton.height + 8
-      content.push(pageButton)
     }
 
     const continueButton = this.createShopButton(
@@ -3363,7 +3652,6 @@ export default class GameScene extends Phaser.Scene {
   }
 
   private buyShopItem(itemId: ShopItemId, quiet = false) {
-    const item = shopConfig[itemId]
     const weaponUnlock = shopWeaponUnlocks[itemId]
 
     if (weaponUnlock && this.ownedWeapons.has(weaponUnlock)) {
@@ -3394,14 +3682,14 @@ export default class GameScene extends Phaser.Scene {
       return false
     }
 
-    if (this.cash < item.cost) {
+    if (this.cash < this.getShopItemCost(itemId)) {
       if (!quiet) {
         this.denyPurchase('Not enough cash')
       }
       return false
     }
 
-    this.updateCash(-item.cost)
+    this.updateCash(-this.getShopItemCost(itemId))
     if (!quiet) {
       this.playSound('purchase')
     }
@@ -3509,7 +3797,7 @@ export default class GameScene extends Phaser.Scene {
 
   private formatShopItemLabel(itemId: ShopItemId) {
     if (itemId === 'healPlayer') {
-      return `Heal +${shopUpgradeConfig.healAmount} HP — $${shopConfig.healPlayer.cost}`
+      return `Heal +${shopUpgradeConfig.healAmount} HP — $${this.getShopItemCost('healPlayer')}`
     }
 
     if (itemId === 'repairAll') {
@@ -3521,7 +3809,7 @@ export default class GameScene extends Phaser.Scene {
     }
 
     if (itemId === 'maxHealthUpgrade') {
-      return `Max HP +${shopUpgradeConfig.maxHealthUpgradeAmount} — $${shopConfig.maxHealthUpgrade.cost} — Level ${this.maxHealthUpgradeLevel}`
+      return `Max HP +${shopUpgradeConfig.maxHealthUpgradeAmount} — $${this.getShopItemCost('maxHealthUpgrade')} — Level ${this.maxHealthUpgradeLevel}`
     }
 
     if (itemId === 'buySmg') {
@@ -3549,7 +3837,7 @@ export default class GameScene extends Phaser.Scene {
       return this.ownsMines ? `Mines — Owned\n${how}` : `Mines — $${shopConfig.buyMines.cost}\n${how}`
     }
 
-    const how = this.useTouchControls ? 'Turret button. Auto-fires nearby.' : 'T / Turret button. Auto-fires nearby.'
+    const how = this.useTouchControls ? 'Turret button. Overheats. Restart it up close.' : 'T to place. Overheats. Press E beside it to restart.'
     return this.ownsTurret ? `Turret — Owned\n${how}` : `Turret — $${shopConfig.buyTurret.cost}\n${how}`
   }
 
@@ -3575,7 +3863,7 @@ export default class GameScene extends Phaser.Scene {
       return false
     }
 
-    return this.cash >= shopConfig[itemId].cost
+    return this.cash >= this.getShopItemCost(itemId)
   }
 
   private refreshShopButtons() {
@@ -3769,6 +4057,10 @@ export default class GameScene extends Phaser.Scene {
       return
     }
 
+    if (this.updatePatternEnemy(zombie, time)) {
+      return
+    }
+
     const attackEntry = this.getAliveEntryInAttackRange(zombie)
 
     if (attackEntry) {
@@ -3800,6 +4092,366 @@ export default class GameScene extends Phaser.Scene {
     zombie.navState = 'chasingPlayer'
     zombie.chase(this.player)
     this.updateZombieStuckState(zombie, time)
+  }
+
+  private nudgeWeaver(zombie: Zombie, time: number) {
+    if (zombie.enemyType !== 'weaver' || !zombie.active) {
+      return
+    }
+
+    const body = zombie.body as Phaser.Physics.Arcade.Body
+    const side = Math.sin(time / 260 + zombie.y * 0.02) * 40
+    body.velocity.x += Math.cos(zombie.rotation + Math.PI / 2) * side
+    body.velocity.y += Math.sin(zombie.rotation + Math.PI / 2) * side
+  }
+
+  private updatePatternEnemy(zombie: Zombie, time: number) {
+    if (zombie.enemyType === 'weaver') {
+      this.fireWeaver(zombie, time)
+      return false
+    }
+
+    if (zombie.enemyType === 'artillery') {
+      return this.fireArtillery(zombie, time)
+    }
+
+    if (zombie.enemyType === 'beam') {
+      return this.fireBeam(zombie, time)
+    }
+
+    if (zombie.enemyType === 'hive') {
+      return this.fireHive(zombie, time)
+    }
+
+    return false
+  }
+
+  private fireWeaver(zombie: Zombie, time: number) {
+    if (time < zombie.nextSpitAt || this.patternShots.length > 140) {
+      return
+    }
+
+    zombie.nextSpitAt = time + 110
+    const angle = zombie.patternAngle
+    zombie.patternAngle += 0.34
+    this.spawnPatternShot('pellet', zombie.x, zombie.y, angle, 165, 5, 4, time + 2000, time + 10000, 0xff4d8d)
+    this.spawnPatternShot('pellet', zombie.x, zombie.y, angle + Math.PI, 165, 5, 4, time + 2000, time + 10000, 0xff4d8d)
+  }
+
+  private fireArtillery(zombie: Zombie, time: number) {
+    if (zombie.spitWindupUntil > 0) {
+      zombie.stopMoving()
+      zombie.rotation = Phaser.Math.Angle.Between(zombie.x, zombie.y, zombie.aimLockX, zombie.aimLockY)
+      if (time < zombie.spitWindupUntil) {
+        return true
+      }
+
+      zombie.spitWindupUntil = 0
+      zombie.nextSpitAt = time + 1500
+      this.dropArtillery(zombie.aimLockX, zombie.aimLockY, time + 700)
+      const spread = this.wave >= 8 ? 46 : 0
+      if (spread > 0) {
+        this.dropArtillery(zombie.aimLockX + spread, zombie.aimLockY, time + 820)
+        this.dropArtillery(zombie.aimLockX - spread, zombie.aimLockY, time + 940)
+      }
+      return true
+    }
+
+    if (time < zombie.nextSpitAt || this.artilleryMarks.length >= 16) {
+      return false
+    }
+
+    const target = this.artilleryTarget(zombie)
+    if (!target) {
+      return false
+    }
+
+    zombie.aimLockX = target.x
+    zombie.aimLockY = target.y
+    zombie.spitWindupUntil = time + 360
+    zombie.stopMoving()
+    zombie.pulseMark()
+    return true
+  }
+
+  private artilleryTarget(zombie: Zombie) {
+    const playerDistance = Phaser.Math.Distance.Between(zombie.x, zombie.y, this.player.x, this.player.y)
+    const sameZone = this.isInsideBase(zombie.x, zombie.y) === this.isInsideBase(this.player.x, this.player.y)
+    if (sameZone && playerDistance < 420 && playerDistance > 90) {
+      return { x: this.player.x, y: this.player.y }
+    }
+
+    let closest: { x: number; y: number } | undefined
+    let closestDistance = 460
+    this.entryPoints.forEach((entry) => {
+      if (!entry.barricade.isAlive) {
+        return
+      }
+
+      const point = this.isInsideBase(zombie.x, zombie.y) ? entry.outsidePoint : entry.insidePoint
+      const distance = Phaser.Math.Distance.Between(zombie.x, zombie.y, point.x, point.y)
+      if (distance < closestDistance) {
+        closest = { x: point.x, y: point.y }
+        closestDistance = distance
+      }
+    })
+    return closest
+  }
+
+  private dropArtillery(x: number, y: number, explodeAt: number) {
+    this.playSound('acidSpit')
+    const sprite = this.add.circle(x, y, 34, 0xffb020, 0.16).setStrokeStyle(3, 0xff5a3c, 0.9).setDepth(3)
+    this.artilleryMarks.push({ x, y, explodeAt, sprite })
+  }
+
+  private fireBeam(zombie: Zombie, time: number) {
+    const active = this.beamTelegraphs.find((beam) => beam.fireAt > time - 140 && Math.hypot(beam.fromX - zombie.x, beam.fromY - zombie.y) < 48)
+    if (zombie.spitWindupUntil > 0 || active) {
+      zombie.stopMoving()
+      return true
+    }
+
+    if (time < zombie.nextSpitAt) {
+      return false
+    }
+
+    const distance = Phaser.Math.Distance.Between(zombie.x, zombie.y, this.player.x, this.player.y)
+    const sameZone = this.isInsideBase(zombie.x, zombie.y) === this.isInsideBase(this.player.x, this.player.y)
+    if (!sameZone || distance > 340 || distance < 70 || !this.hasClearShot(zombie.x, zombie.y, this.player.x, this.player.y)) {
+      return false
+    }
+
+    const angle = Phaser.Math.Angle.Between(zombie.x, zombie.y, this.player.x, this.player.y)
+    const reach = Math.min(380, distance + 40)
+    const aim = this.clipToWall(zombie.x, zombie.y, zombie.x + Math.cos(angle) * reach, zombie.y + Math.sin(angle) * reach)
+    const toX = aim.x
+    const toY = aim.y
+    const sprite = this.add.rectangle(zombie.x, zombie.y, Phaser.Math.Distance.Between(zombie.x, zombie.y, toX, toY), 3, 0x7af0ff, 0.45).setOrigin(0, 0.5).setRotation(angle).setDepth(4)
+    this.beamTelegraphs.push({ fromX: zombie.x, fromY: zombie.y, toX, toY, fireAt: time + 560, fired: false, sprite })
+    for (const offset of [-0.42, 0.42]) {
+      const sideAngle = angle + offset
+      const sideAim = this.clipToWall(zombie.x, zombie.y, zombie.x + Math.cos(sideAngle) * reach * 0.85, zombie.y + Math.sin(sideAngle) * reach * 0.85)
+      const side = this.add.rectangle(zombie.x, zombie.y, Phaser.Math.Distance.Between(zombie.x, zombie.y, sideAim.x, sideAim.y), 3, 0x7af0ff, 0.35).setOrigin(0, 0.5).setRotation(sideAngle).setDepth(4)
+      this.beamTelegraphs.push({ fromX: zombie.x, fromY: zombie.y, toX: sideAim.x, toY: sideAim.y, fireAt: time + 560, fired: false, sprite: side })
+    }
+    zombie.spitWindupUntil = time + 560
+    zombie.nextSpitAt = time + 1700
+    zombie.aimLockX = toX
+    zombie.aimLockY = toY
+    zombie.stopMoving()
+    zombie.pulseMark()
+    this.time.delayedCall(680, () => {
+      zombie.spitWindupUntil = 0
+    })
+    return true
+  }
+
+  private fireHive(zombie: Zombie, time: number) {
+    const distance = Phaser.Math.Distance.Between(zombie.x, zombie.y, this.player.x, this.player.y)
+    if (distance < 190) {
+      const away = Math.atan2(zombie.y - this.player.y, zombie.x - this.player.x)
+      zombie.moveToward(zombie.x + Math.cos(away) * 80, zombie.y + Math.sin(away) * 80)
+    } else if (distance < 360) {
+      zombie.stopMoving()
+    } else {
+      this.spitGnats(zombie, time)
+      return false
+    }
+
+    this.spitGnats(zombie, time)
+    return true
+  }
+
+  private spitGnats(zombie: Zombie, time: number) {
+    if (time < zombie.nextSpitAt || this.patternShots.length > 130) {
+      return
+    }
+
+    zombie.nextSpitAt = time + 850
+    this.playSound('acidSpit')
+    for (let index = 0; index < 8; index += 1) {
+      const angle = zombie.patternAngle + (Math.PI * 2 * index) / 8
+      this.spawnPatternShot('gnat', zombie.x, zombie.y, angle, 110, 4, 5, time + 4600, 0, 0xc084fc)
+    }
+    zombie.patternAngle += 0.4
+  }
+
+  private burstSplitter(x: number, y: number) {
+    const time = this.time.now
+    for (let index = 0; index < 6; index += 1) {
+      this.spawnPatternShot('shard', x, y, (Math.PI * 2 * index) / 6, 280, 8, 6, time + 1700, time + 140, 0xffe14d)
+    }
+  }
+
+  private spawnPatternShot(kind: PatternShot['kind'], x: number, y: number, angle: number, speed: number, damage: number, radius: number, expiresAt: number, turnAfter: number, color: number) {
+    const sprite = this.add.circle(x, y, radius, color, 0.92).setStrokeStyle(2, 0xffffff, 0.65).setDepth(5)
+    this.patternShots.push({
+      kind,
+      x,
+      y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      damage,
+      radius,
+      expiresAt,
+      turnAfter,
+      sprite,
+    })
+  }
+
+  private updatePatternHazards(time: number) {
+    const delta = Math.min(0.05, this.game.loop.delta / 1000)
+    this.updateArtilleryMarks(time, delta)
+    this.updateBeams(time)
+    this.updatePatternShots(time, delta)
+  }
+
+  private updateArtilleryMarks(time: number, delta: number) {
+    this.artilleryMarks = this.artilleryMarks.filter((mark) => {
+      if (this.wave >= 12) {
+        const angle = Phaser.Math.Angle.Between(mark.x, mark.y, this.player.x, this.player.y)
+        mark.x += Math.cos(angle) * 34 * delta
+        mark.y += Math.sin(angle) * 34 * delta
+        mark.sprite.setPosition(mark.x, mark.y)
+      }
+
+      const left = mark.explodeAt - time
+      mark.sprite.setAlpha(0.12 + Math.sin(time / 70) * 0.08)
+      if (left > 0) {
+        return true
+      }
+
+      this.playSound('mineBoom')
+      const blast = this.add.circle(mark.x, mark.y, 16, 0xff5a3c, 0.35).setDepth(4)
+      this.tweens.add({ targets: blast, scale: 2.4, alpha: 0, duration: 180, onComplete: () => blast.destroy() })
+      if (Phaser.Math.Distance.Between(mark.x, mark.y, this.player.x, this.player.y) <= 46) {
+        this.hurtPlayer(16, true)
+      }
+      mark.sprite.destroy()
+      return false
+    })
+  }
+
+  private updateBeams(time: number) {
+    this.beamTelegraphs = this.beamTelegraphs.filter((beam) => {
+      const charge = Phaser.Math.Clamp(1 - (beam.fireAt - time) / 560, 0, 1)
+      beam.sprite.setScale(1, 0.6 + charge * 3)
+      beam.sprite.setAlpha(0.25 + charge * 0.6)
+      if (time < beam.fireAt) {
+        return true
+      }
+
+      if (!beam.fired) {
+        beam.fired = true
+        beam.sprite.setFillStyle(0xffffff, 0.95)
+        if (this.distanceToSegment(this.player.x, this.player.y, beam.fromX, beam.fromY, beam.toX, beam.toY) <= 16) {
+          this.hurtPlayer(22, true)
+        }
+        this.playSound('wardenSlam')
+      }
+
+      if (time > beam.fireAt + 120) {
+        beam.sprite.destroy()
+        return false
+      }
+
+      return true
+    })
+  }
+
+  private updatePatternShots(time: number, delta: number) {
+    this.patternShots = this.patternShots.filter((shot) => {
+      if (time >= shot.expiresAt) {
+        shot.sprite.destroy()
+        return false
+      }
+
+      if (time >= shot.turnAfter) {
+        const desired = Math.atan2(this.player.y - shot.y, this.player.x - shot.x)
+        const current = Math.atan2(shot.vy, shot.vx)
+        const deltaAngle = Math.atan2(Math.sin(desired - current), Math.cos(desired - current))
+        const turn = (shot.kind === 'gnat' ? 1.7 : 2.6) * delta
+        const next = current + Phaser.Math.Clamp(deltaAngle, -turn, turn)
+        const speed = Math.hypot(shot.vx, shot.vy)
+        shot.vx = Math.cos(next) * speed
+        shot.vy = Math.sin(next) * speed
+      }
+
+      shot.x += shot.vx * delta
+      shot.y += shot.vy * delta
+      shot.sprite.setPosition(shot.x, shot.y)
+
+      if (this.pointHitsWall(shot.x, shot.y, shot.radius)) {
+        shot.sprite.destroy()
+        return false
+      }
+
+      if (this.shotHitByBullet(shot)) {
+        shot.sprite.destroy()
+        return false
+      }
+
+      if (Phaser.Math.Distance.Between(shot.x, shot.y, this.player.x, this.player.y) <= shot.radius + 12) {
+        this.hurtPlayer(shot.damage)
+        shot.sprite.destroy()
+        return false
+      }
+
+      return true
+    })
+  }
+
+  private shotHitByBullet(shot: PatternShot) {
+    let hit = false
+    this.bullets.children.each((child) => {
+      const bullet = child as Bullet
+      if (!bullet.active || hit) {
+        return true
+      }
+
+      if (Phaser.Math.Distance.Between(shot.x, shot.y, bullet.x, bullet.y) <= shot.radius + 8) {
+        hit = true
+      }
+      return true
+    })
+    return hit
+  }
+
+  private swatPatternShots(x: number, y: number, angle: number, halfCone: number, range: number) {
+    this.patternShots = this.patternShots.filter((shot) => {
+      const offsetX = shot.x - x
+      const offsetY = shot.y - y
+      const distance = Math.hypot(offsetX, offsetY)
+      if (distance > range) {
+        return true
+      }
+
+      const aim = Math.atan2(offsetY, offsetX)
+      const delta = Math.atan2(Math.sin(aim - angle), Math.cos(aim - angle))
+      if (Math.abs(delta) > halfCone) {
+        return true
+      }
+
+      shot.sprite.destroy()
+      return false
+    })
+  }
+
+  private distanceToSegment(px: number, py: number, x1: number, y1: number, x2: number, y2: number) {
+    const dx = x2 - x1
+    const dy = y2 - y1
+    const lengthSquared = dx * dx + dy * dy
+    const t = lengthSquared === 0 ? 0 : Phaser.Math.Clamp(((px - x1) * dx + (py - y1) * dy) / lengthSquared, 0, 1)
+    return Phaser.Math.Distance.Between(px, py, x1 + dx * t, y1 + dy * t)
+  }
+
+  private clearPatternHazards() {
+    this.patternShots.forEach((shot) => shot.sprite.destroy())
+    this.artilleryMarks.forEach((mark) => mark.sprite.destroy())
+    this.beamTelegraphs.forEach((beam) => beam.sprite.destroy())
+    this.patternShots = []
+    this.artilleryMarks = []
+    this.beamTelegraphs = []
   }
 
   private updatePlayerZoneNavigation() {
@@ -4381,7 +5033,8 @@ export default class GameScene extends Phaser.Scene {
       }, 1)
 
       const slowed = zombie.suppressedUntil > this.time.now ? speedMultiplier * 0.72 : speedMultiplier
-      zombie.setSpeedMultiplier(slowed)
+      const pressure = this.pressureActive ? waveConfig.pressureSpeedMultiplier : 1
+      zombie.setSpeedMultiplier(slowed * pressure)
       zombie.setBuffed(speedMultiplier > 1.01)
     })
 
@@ -4449,7 +5102,12 @@ export default class GameScene extends Phaser.Scene {
       const targetY = this.player.y
       zombie.spitWindupUntil = 0
       zombie.nextSpitAt = time + zombie.spitCooldownMs
-      this.launchAcid(zombie.x, zombie.y, targetX, targetY, zombie.spitDamage)
+      const aim = Phaser.Math.Angle.Between(zombie.x, zombie.y, targetX, targetY)
+      for (let index = -1; index <= 1; index += 1) {
+        const angle = aim + index * 0.28
+        const reach = Math.max(80, Phaser.Math.Distance.Between(zombie.x, zombie.y, targetX, targetY))
+        this.launchAcid(zombie.x, zombie.y, zombie.x + Math.cos(angle) * reach, zombie.y + Math.sin(angle) * reach, zombie.spitDamage)
+      }
       return true
     }
 
@@ -4462,6 +5120,29 @@ export default class GameScene extends Phaser.Scene {
     zombie.spitWindupUntil = time + 420
     zombie.pulseMark()
     return true
+  }
+
+  private pointHitsWall(x: number, y: number, padding = 0) {
+    return this.wallRects.some((wall) => {
+      const bounds = wall.getBounds()
+      return x >= bounds.x - padding && x <= bounds.right + padding && y >= bounds.y - padding && y <= bounds.bottom + padding
+    })
+  }
+
+  private clipToWall(fromX: number, fromY: number, toX: number, toY: number) {
+    const steps = 16
+    let lastX = fromX
+    let lastY = fromY
+    for (let step = 1; step <= steps; step += 1) {
+      const x = fromX + (toX - fromX) * (step / steps)
+      const y = fromY + (toY - fromY) * (step / steps)
+      if (this.pointHitsWall(x, y)) {
+        return { x: lastX, y: lastY }
+      }
+      lastX = x
+      lastY = y
+    }
+    return { x: toX, y: toY }
   }
 
   private hasClearShot(fromX: number, fromY: number, toX: number, toY: number) {
@@ -4481,13 +5162,26 @@ export default class GameScene extends Phaser.Scene {
   private launchAcid(fromX: number, fromY: number, toX: number, toY: number, damage: number) {
     this.playSound('acidSpit')
     const acid = this.add.circle(fromX, fromY, 6, 0xc9ff6a, 0.9).setStrokeStyle(2, 0x9b59ff, 0.9).setDepth(5)
+    let stopped = false
     this.tweens.add({
       targets: acid,
       x: toX,
       y: toY,
       duration: 340,
       ease: 'Linear',
+      onUpdate: () => {
+        if (stopped || !acid.active) {
+          return
+        }
+        if (this.pointHitsWall(acid.x, acid.y, 4)) {
+          stopped = true
+          acid.destroy()
+        }
+      },
       onComplete: () => {
+        if (stopped || !acid.active) {
+          return
+        }
         const splash = this.add.circle(acid.x, acid.y, 10, 0x9b59ff, 0.35).setDepth(4)
         this.tweens.add({ targets: splash, alpha: 0, scale: 1.4, duration: 140, onComplete: () => splash.destroy() })
         if (Phaser.Math.Distance.Between(acid.x, acid.y, this.player.x, this.player.y) <= 26) {
@@ -4571,7 +5265,7 @@ export default class GameScene extends Phaser.Scene {
       return
     }
 
-    this.hurtPlayer(zombie.damage, false, true)
+    this.hurtPlayer(this.getBiteDamage(zombie), false, true)
   }
 
   private updateHealthBar() {

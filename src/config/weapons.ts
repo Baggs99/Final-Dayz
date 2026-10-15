@@ -100,6 +100,8 @@ export const toolConfig = {
   turretRange: 220,
   turretFireRateMs: 400,
   turretDamage: 16,
+  /** Continuous shots before the turret locks up and must be restarted up close. */
+  turretBurstShots: 16,
   meleeCooldownMs: 2500,
   meleeRange: 70,
   meleeDamage: 45,
