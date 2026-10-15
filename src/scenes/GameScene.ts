@@ -496,6 +496,7 @@ export default class GameScene extends Phaser.Scene {
         const zombie = child as Zombie
         this.updateZombieTarget(zombie, time)
         this.nudgeWeaver(zombie, time)
+        this.separateZombie(zombie)
         this.updateWarden(zombie, time)
         this.updateZombieDebugLabel(zombie)
         this.damagePlayerOnContact(zombie, time)
@@ -3511,8 +3512,27 @@ export default class GameScene extends Phaser.Scene {
         fontSize: '14px',
       })
       .setOrigin(0.5, 0)
-    cursor += this.shopStatusText.height + 14
-    content.push(title, bonus, this.shopStatusText)
+    cursor += this.shopStatusText.height + 10
+    const offerHeading = this.add
+      .text(0, cursor, 'RANDOM OFFERS', {
+        color: '#fff2a8',
+        fontFamily: 'Arial',
+        fontSize: compact ? '13px' : '14px',
+        fontStyle: 'bold',
+      })
+      .setOrigin(0.5, 0)
+    cursor += offerHeading.height + 4
+    const offerNote = this.add
+      .text(0, cursor, 'Heal is always for sale. These 3 were rolled for this wave.', {
+        align: 'center',
+        color: '#d9e8d9',
+        fontFamily: 'Arial',
+        fontSize: compact ? '14px' : '15px',
+        wordWrap: { width: panelWidth - 48 },
+      })
+      .setOrigin(0.5, 0)
+    cursor += offerNote.height + 12
+    content.push(title, bonus, this.shopStatusText, offerHeading, offerNote)
     this.shopLabels.clear()
 
     const columns = compact ? 1 : 2
@@ -3526,7 +3546,7 @@ export default class GameScene extends Phaser.Scene {
           this.formatShopItemLabel(itemId),
           () => this.handleShopItemClick(itemId),
           shopConfig[itemId].repeatable ? () => this.buyMaxShopItem(itemId) : undefined,
-          '#20262b',
+          itemId === 'healPlayer' ? '#1d4a32' : '#20262b',
           '#ffffff',
           buttonWidth,
         )
@@ -3882,7 +3902,7 @@ export default class GameScene extends Phaser.Scene {
 
   private formatShopItemLabel(itemId: ShopItemId) {
     if (itemId === 'healPlayer') {
-      return `Heal +${shopUpgradeConfig.healAmount} HP — $${this.getShopItemCost('healPlayer')}`
+      return `Always  ·  Heal +${shopUpgradeConfig.healAmount} HP — $${this.getShopItemCost('healPlayer')}`
     }
 
     if (itemId === 'repairAll') {
@@ -4862,8 +4882,9 @@ export default class GameScene extends Phaser.Scene {
       entry.outsidePoint.y,
     )
 
-    if (distanceToOutsidePoint > 18) {
-      zombie.moveToward(entry.outsidePoint.x, entry.outsidePoint.y)
+    if (distanceToOutsidePoint > 36) {
+      const approach = this.barricadeApproachPoint(zombie, entry)
+      zombie.moveToward(approach.x, approach.y)
       this.updateZombieStuckState(zombie, time)
       return
     }
@@ -4967,20 +4988,119 @@ export default class GameScene extends Phaser.Scene {
     }
 
     const movedDistance = Phaser.Math.Distance.Between(zombie.x, zombie.y, zombie.lastStuckX, zombie.lastStuckY)
+    const radius = enemyConfigs[zombie.enemyType].radius
 
     zombie.lastStuckCheckAt = time
     zombie.lastStuckX = zombie.x
     zombie.lastStuckY = zombie.y
 
-    if (movedDistance > 8) {
+    if (movedDistance > Math.max(10, radius * 0.45)) {
       return
     }
 
+    this.unstickZombie(zombie)
     zombie.navState = 'stuck'
     zombie.path = []
     zombie.pathIndex = 0
-    zombie.nextPathAt = 0
+    zombie.nextPathAt = time + 250
     zombie.currentTargetPoint = undefined
+  }
+
+  private barricadeApproachPoint(zombie: Zombie, entry: EntryPoint) {
+    const alongDoor = entry.id === 'top' || entry.id === 'bottom'
+    const spread = (enemyConfigs[zombie.enemyType].radius + 8) * zombie.lane
+    return {
+      x: entry.outsidePoint.x + (alongDoor ? spread : 0),
+      y: entry.outsidePoint.y + (alongDoor ? 0 : spread),
+    }
+  }
+
+  private separateZombie(zombie: Zombie) {
+    if (!zombie.active || zombie.navState === 'attackingBarricade') {
+      return
+    }
+
+    const radius = enemyConfigs[zombie.enemyType].radius
+    let pushX = 0
+    let pushY = 0
+    this.zombies.children.each((child) => {
+      const other = child as Zombie
+      if (!other.active || other === zombie) {
+        return true
+      }
+
+      const dx = zombie.x - other.x
+      const dy = zombie.y - other.y
+      const distance = Math.hypot(dx, dy) || 0.01
+      const minimum = radius + enemyConfigs[other.enemyType].radius + 6
+      if (distance < minimum) {
+        const strength = (minimum - distance) / minimum
+        pushX += (dx / distance) * strength
+        pushY += (dy / distance) * strength
+      }
+      return true
+    })
+
+    this.wallRects.forEach((wall) => {
+      const bounds = wall.getBounds()
+      const closestX = Phaser.Math.Clamp(zombie.x, bounds.left, bounds.right)
+      const closestY = Phaser.Math.Clamp(zombie.y, bounds.top, bounds.bottom)
+      const dx = zombie.x - closestX
+      const dy = zombie.y - closestY
+      const distance = Math.hypot(dx, dy)
+      if (distance > 0.01 && distance < radius + 4) {
+        pushX += (dx / distance) * 1.5
+        pushY += (dy / distance) * 1.5
+      }
+    })
+
+    if (pushX === 0 && pushY === 0) {
+      return
+    }
+
+    const body = zombie.body as Phaser.Physics.Arcade.Body
+    const length = Math.hypot(pushX, pushY) || 1
+    body.velocity.x += (pushX / length) * 80
+    body.velocity.y += (pushY / length) * 80
+  }
+
+  private unstickZombie(zombie: Zombie) {
+    const body = zombie.body as Phaser.Physics.Arcade.Body
+    const radius = enemyConfigs[zombie.enemyType].radius
+    let pushX = 0
+    let pushY = 0
+    this.zombies.children.each((child) => {
+      const other = child as Zombie
+      if (!other.active || other === zombie) {
+        return true
+      }
+
+      const dx = zombie.x - other.x
+      const dy = zombie.y - other.y
+      const distance = Math.hypot(dx, dy)
+      if (distance < radius + enemyConfigs[other.enemyType].radius + 8) {
+        if (distance < 1) {
+          const angle = Phaser.Math.FloatBetween(0, Math.PI * 2)
+          pushX += Math.cos(angle)
+          pushY += Math.sin(angle)
+        } else {
+          pushX += dx / distance
+          pushY += dy / distance
+        }
+      }
+      return true
+    })
+
+    if (pushX === 0 && pushY === 0) {
+      const angle = zombie.rotation + Math.PI / 2
+      pushX = Math.cos(angle)
+      pushY = Math.sin(angle)
+    }
+
+    const length = Math.hypot(pushX, pushY) || 1
+    const nudge = radius + 14
+    body.reset(zombie.x + (pushX / length) * nudge, zombie.y + (pushY / length) * nudge)
+    body.setVelocity((pushX / length) * zombie.speed, (pushY / length) * zombie.speed)
   }
 
   private isInsideBase(x: number, y: number) {

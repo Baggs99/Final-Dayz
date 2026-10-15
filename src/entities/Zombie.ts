@@ -46,6 +46,7 @@ export default class Zombie extends Phaser.Physics.Arcade.Sprite {
   lastStuckCheckAt = 0
   lastStuckX = 0
   lastStuckY = 0
+  lane = 0
   suppressedUntil = 0
   spitWindupUntil = 0
   nextSpitAt = 0
@@ -74,6 +75,7 @@ export default class Zombie extends Phaser.Physics.Arcade.Sprite {
     const config = enemyConfigs[enemyType]
     const paceWave = Math.min(wave, waveConfig.paceCapWave)
     this.enemyType = enemyType
+    this.lane = Phaser.Math.Between(-1, 1)
     this.maxHealth = Math.round((this.maxHealth + wave * waveConfig.zombieHealthPerWave) * config.healthMultiplier * healthScale)
     this.health = this.maxHealth
     this.baseSpeed = Math.round((this.baseSpeed + paceWave * waveConfig.zombieSpeedPerWave) * config.speedMultiplier)
@@ -90,7 +92,7 @@ export default class Zombie extends Phaser.Physics.Arcade.Sprite {
     this.screamRadius = config.screamRadius ?? 0
     this.screamSpeedMultiplier = config.screamSpeedMultiplier ?? 1
     this.setCircle(config.radius)
-    this.setBounce(0.15)
+    this.setBounce(enemyType === 'brute' ? 0 : 0.15)
     this.setDrag(120)
     this.setTint(config.color)
     this.setDisplaySize(config.radius * 2, config.radius * 2)
