@@ -511,6 +511,8 @@ export default class GameScene extends Phaser.Scene {
     if (this.gameMode === 'singlePlayer' && this.isIntermission && Phaser.Input.Keyboard.JustDown(this.keys.ENTER)) {
       this.startNextWave()
     }
+
+    this.updateLightsOut()
   }
 
   private createCircleTexture(key: string, size: number, fillColor: number, strokeColor: number) {
@@ -2266,6 +2268,73 @@ export default class GameScene extends Phaser.Scene {
     })
   }
 
+  private lightsOut?: Phaser.GameObjects.Image
+
+  private isLightsOutWave() {
+    return this.wave > 0 && this.wave % 10 === 0
+  }
+
+  private updateLightsOut() {
+    const active = this.isLightsOutWave() && this.isStarted && !this.isIntermission && !this.isGameOver && !this.isPaused
+    if (!active && !this.lightsOut) {
+      return
+    }
+
+    const texture = this.lightsOutCanvas()
+    if (!this.lightsOut) {
+      this.lightsOut = this.add.image(0, 0, 'lights-out').setOrigin(0, 0).setDepth(14).setScrollFactor(0)
+    }
+
+    this.lightsOut.setVisible(active)
+    this.lightsOut.setDisplaySize(texture.width, texture.height)
+    if (!active) {
+      return
+    }
+
+    this.paintLightsOut(texture)
+  }
+
+  private lightsOutCanvas() {
+    const width = Math.max(2, Math.floor(this.scale.width))
+    const height = Math.max(2, Math.floor(this.scale.height))
+    if (!this.textures.exists('lights-out')) {
+      return this.textures.createCanvas('lights-out', width, height)!
+    }
+
+    const texture = this.textures.get('lights-out') as Phaser.Textures.CanvasTexture
+    if (texture.width !== width || texture.height !== height) {
+      texture.setSize(width, height)
+    }
+    return texture
+  }
+
+  private paintLightsOut(texture: Phaser.Textures.CanvasTexture) {
+    const context = texture.getContext()
+    const width = texture.width
+    const height = texture.height
+    context.clearRect(0, 0, width, height)
+    context.globalCompositeOperation = 'source-over'
+    context.fillStyle = 'rgba(0, 0, 0, 0.97)'
+    context.fillRect(0, 0, width, height)
+    context.globalCompositeOperation = 'destination-out'
+    context.fillStyle = '#000000'
+    context.fillRect(this.baseBounds.x, this.baseBounds.y, this.baseBounds.width, this.baseBounds.height)
+
+    const aim = Math.atan2(this.lastAimWorldPoint.y - this.player.y, this.lastAimWorldPoint.x - this.player.x)
+    const half = Phaser.Math.DegToRad(34)
+    const reach = Math.hypot(width, height)
+    context.beginPath()
+    context.moveTo(this.player.x, this.player.y)
+    context.arc(this.player.x, this.player.y, reach, aim - half, aim + half)
+    context.closePath()
+    context.fill()
+    context.beginPath()
+    context.arc(this.player.x, this.player.y, 46, 0, Math.PI * 2)
+    context.fill()
+    context.globalCompositeOperation = 'source-over'
+    texture.refresh()
+  }
+
   private showWaveBanner(text: string, color = '#fff2a8') {
     this.waveBanner?.destroy()
     this.waveBanner = this.add
@@ -3118,7 +3187,13 @@ export default class GameScene extends Phaser.Scene {
     this.waveText.setText(this.formatWaveLabel())
     this.skipRoundButton.setText('Skip Round')
     this.skipRoundButton.setVisible(this.gameMode === 'singlePlayer')
-    if (this.pendingBossEnemyType) {
+    if (this.pendingBossEnemyType && this.isLightsOutWave()) {
+      this.showWaveBanner('LIGHTS OUT', '#d5e6ff')
+      this.playSound('wardenWarn')
+    } else if (this.isLightsOutWave()) {
+      this.showWaveBanner('LIGHTS OUT', '#d5e6ff')
+      this.playSound('waveStart')
+    } else if (this.pendingBossEnemyType) {
       this.showWaveBanner('Wave 10: THE WARDEN', '#8eb4ff')
       this.playSound('wardenWarn')
     } else if (this.waveModifier) {
