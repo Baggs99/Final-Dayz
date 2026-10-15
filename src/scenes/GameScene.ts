@@ -2086,14 +2086,13 @@ export default class GameScene extends Phaser.Scene {
     const wrapWidth = Math.max(150, right - left - 136)
     this.ownedWeaponsText.setText(this.getOwnedWeaponsLabel())
     this.ownedWeaponsText.setWordWrapWidth(wrapWidth)
-    this.controlsHintText.setText(this.getPlayingControlsHint())
-    this.controlsHintText.setFontSize(narrow ? 12 : 13)
-    this.controlsHintText.setWordWrapWidth(wrapWidth)
+    this.controlsHintText.setVisible(false)
     this.perkText.setWordWrapWidth(wrapWidth)
     this.toolText.setText(this.formatToolHud(this.time.now))
     this.waveText.setFontSize(narrow ? 14 : 20)
     this.scoreText.setFontSize(narrow ? 14 : 20)
     this.cashText.setFontSize(narrow ? 14 : 20)
+    this.weaponText.setText(this.formatWeaponHud())
     this.weaponText.setFontSize(narrow ? 14 : 20)
 
     let cursor = top + 28
@@ -2114,8 +2113,6 @@ export default class GameScene extends Phaser.Scene {
     cursor += this.weaponText.height + 2
     this.ownedWeaponsText.setPosition(left, cursor)
     cursor += this.ownedWeaponsText.height + 2
-    this.controlsHintText.setPosition(left, cursor)
-    cursor += this.controlsHintText.height + 2
     this.barricadeText.setPosition(left, cursor)
     cursor += this.barricadeText.height + 2
     this.perkText.setPosition(left, cursor)
@@ -2131,7 +2128,7 @@ export default class GameScene extends Phaser.Scene {
     this.cashText.setVisible(playing)
     this.weaponText.setVisible(playing)
     this.ownedWeaponsText.setVisible(playing)
-    this.controlsHintText.setVisible(playing && !this.shopOverlay && !this.perkOverlay)
+    this.controlsHintText.setVisible(false)
     this.timerText.setVisible(playing && !this.shopOverlay && !this.perkOverlay)
     this.highScoreText.setVisible(playing && !narrow && !this.shopOverlay && !this.perkOverlay)
     this.barricadeText.setVisible(playing && !this.shopOverlay && !this.perkOverlay)
@@ -2170,28 +2167,40 @@ export default class GameScene extends Phaser.Scene {
     this.updateHealthBar()
   }
 
-  private getPlayingControlsHint() {
+  private weaponHotkey(weaponId: WeaponId) {
+    const keys: Record<WeaponId, string> = {
+      pistol: '1',
+      smg: '2',
+      shotgun: '3',
+      rifle: '4',
+      flamethrower: '5',
+    }
+    return keys[weaponId]
+  }
+
+  private formatWeaponHud() {
     if (this.useTouchControls) {
-      return 'Stick move · Pad fire · Weapon · Repair · Melee'
+      return `Weapon ${this.currentWeapon.name}`
     }
 
-    return 'WASD · Mouse aim · Hold click · E repair · 1–5 guns · Q mine · T turret · Space melee'
+    return `Weapon ${this.currentWeapon.name}  ${this.weaponHotkey(this.currentWeaponId)}`
   }
 
   private getOwnedWeaponsLabel() {
     const owned = weaponCycle
       .filter((weaponId) => this.ownedWeapons.has(weaponId))
-      .map((weaponId) => weapons[weaponId].name)
+      .map((weaponId) => this.useTouchControls ? weapons[weaponId].name : `${this.weaponHotkey(weaponId)} ${weapons[weaponId].name}`)
 
     if (this.ownsMines) {
-      owned.push('Mines')
+      owned.push(this.useTouchControls ? 'Mine' : 'Q Mines')
     }
 
     if (this.ownsTurret) {
-      owned.push('Turret')
+      owned.push(this.useTouchControls ? 'Turret' : 'T Turret')
     }
 
-    return `Owned ${owned.join(', ')}`
+    owned.push(this.useTouchControls ? 'Melee' : 'Space Melee')
+    return owned.join(' · ')
   }
 
   private getBarricadeStatusLabel() {
@@ -2530,16 +2539,17 @@ export default class GameScene extends Phaser.Scene {
   private formatToolHud(time = this.time.now) {
     const parts: string[] = []
     if (this.ownsMines) {
-      parts.push(`Mines ${this.mines.length}/${toolConfig.mineMax}`)
+      parts.push(this.useTouchControls ? `Mines ${this.mines.length}/${toolConfig.mineMax}` : `Mines ${this.mines.length}/${toolConfig.mineMax}  Q`)
     }
     if (this.ownsTurret) {
       const hot = this.turrets.filter((turret) => turret.overheated).length
-      parts.push(hot > 0 ? `Turrets ${hot} hot` : `Turrets ${this.turrets.length}/${toolConfig.turretMax}`)
+      const label = hot > 0 ? `Turrets ${hot} hot` : `Turrets ${this.turrets.length}/${toolConfig.turretMax}`
+      parts.push(this.useTouchControls ? label : `${label}  T`)
     }
     if (!this.useTouchControls && this.isStarted && !this.isIntermission) {
       const readyIn = toolConfig.meleeCooldownMs - (time - this.lastMeleeAt)
       if (readyIn > 0) {
-        parts.push(`Melee ${(readyIn / 1000).toFixed(1)}s`)
+        parts.push(`Melee ${(readyIn / 1000).toFixed(1)}s  Space`)
       }
     }
     return parts.join('  ')
@@ -2902,7 +2912,7 @@ export default class GameScene extends Phaser.Scene {
     }
 
     this.currentWeaponId = weaponId
-    this.weaponText.setText(`Weapon ${this.currentWeapon.name}`)
+    this.weaponText.setText(this.formatWeaponHud())
     this.touchWeaponButton?.setText(this.currentWeapon.name)
     this.emitMultiplayerStateNow()
   }
